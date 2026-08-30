@@ -1,13 +1,14 @@
 ﻿<#
 .SYNOPSIS
-    RICOH THETAの未加工動画・静止画を対話型設定・正常な天頂補正・4ch空間音声(FLAC/PCM)展開・任意方位固定で一括変換します。
+    RICOH THETAの未加工動画・静止画を対話型設定・正常な天頂補正・4ch空間音声(SA3D内蔵MOV/PCM)展開・任意方位固定で一括変換します。
 
 .DESCRIPTION
     RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
-    純正パイプラインを100%そのまま使用し、独自のバイナリ操作を行うことなく高品質な360度Equirectangular動画を生成します。
+    純正パイプラインを100%そのまま使用し、YouTubeやVRプレイヤーで確実に360度空間音声（Ambisonics SA3D）として認識される
+    高品質なEquirectangular動画を生成します。
     RAMDISK（R:\ 等）の自動検出と中間作業領域の完全RAM化に対応し、SSD書き込み寿命を強力に保護します。
-    4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
-    MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
+    公式標準の MOV (PCM 4ch + SA3D内蔵) を最優先推奨・デフォルトとし、
+    空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
     任意の方位角度（度）または動画タイムコード指定による正面位置の固定、
     GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
     また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
@@ -19,10 +20,10 @@
     スタビライズ・方位固定モード（Spatial: 空間方位固定 / Camera: カメラ正面追従 / Lock: 方位ロック / ImageBlur: 手ブレ補正ON）。
 
 .PARAMETER Container
-    出力コンテナ形式（MP4 / MOV）。
+    出力コンテナ形式（MOV: YouTube/VR空間音声公式推奨 / MP4: 汎用）。
 
 .PARAMETER AudioCodec
-    音声コーデック（FLAC: 可逆圧縮軽量化 / PCM: 非圧縮 / Stereo: 通常ステレオ）。
+    音声コーデック（PCM: YouTube/VR空間音声公式標準 / FLAC: 非推奨・ローカル保存用 / Stereo: 通常ステレオ）。
 
 .PARAMETER YawOffset
     動画全体の正面方向（ヨー角）オフセット（度、例: 90, -45, 180）。
@@ -46,10 +47,10 @@
     .\Convert-ThetaVideo.ps1 -Path .\R0010414.MP4
 
 .EXAMPLE
-    .\Convert-ThetaVideo.ps1 *.MP4 -Mode Spatial -YawOffset 90 -NonInteractive
+    .\Convert-ThetaVideo.ps1 *.MP4 -Mode Spatial -Container MOV -AudioCodec PCM -NonInteractive
 
 .EXAMPLE
-    .\Convert-ThetaVideo.ps1 *.MP4 -CenterTime "00:00:15" -TempDir "R:\Temp" -NonInteractive
+    .\Convert-ThetaVideo.ps1 *.MP4 -CenterTime "00:00:15" -NonInteractive
 
 .EXAMPLE
     .\Convert-ThetaVideo.ps1 -h
@@ -63,10 +64,10 @@ param (
     [ValidateSet('Spatial', 'Camera', 'Lock', 'ImageBlur')]
     [string]$Mode,
 
-    [ValidateSet('MP4', 'MOV')]
+    [ValidateSet('MOV', 'MP4')]
     [string]$Container,
 
-    [ValidateSet('FLAC', 'PCM', 'Stereo')]
+    [ValidateSet('PCM', 'FLAC', 'Stereo')]
     [string]$AudioCodec,
 
     [double]$YawOffset = 0.0,
@@ -329,12 +330,12 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     # 3. Container selection
     if ([string]::IsNullOrWhiteSpace($Container)) {
         Write-Host "`n[3] 出力ファイル形式 (コンテナ) を選択してください:" -ForegroundColor Yellow
-        Write-Host "  1: MP4 (.mp4) - 汎用・YouTube・Googleフォト・VR標準 [デフォルト]"
-        Write-Host "  2: MOV (.mov) - QuickTime / Apple互換"
+        Write-Host "  1: MOV (.mov) - YouTube / Google / VR 空間音声公式推奨 (SA3Dメタデータ完全内蔵) [推奨/デフォルト]"
+        Write-Host "  2: MP4 (.mp4) - 汎用・ローカル再生用"
         $containerChoice = Read-Host "選択 [1-2] (デフォルト: 1)"
         switch ($containerChoice.Trim()) {
-            '2' { $Container = 'MOV' }
-            default { $Container = 'MP4' }
+            '2' { $Container = 'MP4' }
+            default { $Container = 'MOV' }
         }
     }
 
@@ -342,14 +343,14 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     if ([string]::IsNullOrWhiteSpace($AudioCodec)) {
         if ($hasMovieConverter) {
             Write-Host "`n[4] 空間音声 (Ambisonics 4ch) のコーデックを選択してください:" -ForegroundColor Yellow
-            Write-Host "  1: FLAC (可逆圧縮 / 音質劣化ゼロ・音声容量約75%削減) [推奨/デフォルト]"
-            Write-Host "  2: PCM (非圧縮 3072kbps / Movie Converter公式標準)"
-            Write-Host "  3: 通常ステレオ音声 (空間音声なし)"
+            Write-Host "  1: PCM (非圧縮 3072kbps / Movie Converter公式標準 / YouTube空間音声100%対応) [推奨/デフォルト]"
+            Write-Host "  2: 通常ステレオ音声 (空間音声なし)"
+            Write-Host "  3: 【スーパー非推奨】FLAC (YouTube等の空間音声タグ認識非対応・ローカル保存用)"
             $audioChoice = Read-Host "選択 [1-3] (デフォルト: 1)"
             switch ($audioChoice.Trim()) {
-                '2' { $AudioCodec = 'PCM' }
-                '3' { $AudioCodec = 'Stereo' }
-                default { $AudioCodec = 'FLAC' }
+                '2' { $AudioCodec = 'Stereo' }
+                '3' { $AudioCodec = 'FLAC' }
+                default { $AudioCodec = 'PCM' }
             }
         } else {
             $AudioCodec = 'Stereo'
@@ -360,9 +361,9 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
 
 # Set defaults if still empty
 if ([string]::IsNullOrWhiteSpace($Mode)) { $Mode = 'Spatial' }
-if ([string]::IsNullOrWhiteSpace($Container)) { $Container = 'MP4' }
+if ([string]::IsNullOrWhiteSpace($Container)) { $Container = 'MOV' }
 if ([string]::IsNullOrWhiteSpace($AudioCodec)) {
-    $AudioCodec = if ($hasMovieConverter) { 'FLAC' } else { 'Stereo' }
+    $AudioCodec = if ($hasMovieConverter) { 'PCM' } else { 'Stereo' }
 }
 #endregion
 
@@ -437,8 +438,8 @@ if ($videoFiles.Count -gt 0) {
     Write-Host "  - 一時作業領域 : $tempDisplayStr" -ForegroundColor White
     Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
     Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
-    Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant()))" -ForegroundColor White
-    Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -ne 'Stereo') { '(4ch 空間音声 Ambisonics)' })" -ForegroundColor White
+    Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant())) $(if ($Container -eq 'MOV') { '[YouTube空間音声公式推奨 / SA3D内蔵]' })" -ForegroundColor White
+    Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -eq 'PCM') { '(4ch 空間音声 Ambisonics / YouTube公式完全対応)' } elseif ($AudioCodec -eq 'FLAC') { '【スーパー非推奨 / YouTube空間音声非対応】' } else { '(通常ステレオ)' })" -ForegroundColor White
     Write-Host "============================================================" -ForegroundColor Cyan
 
     $vIdx = 0
@@ -498,22 +499,23 @@ if ($videoFiles.Count -gt 0) {
                         $fmtParam = "-f mp4"
                     }
                     'PCM' {
-                        $audioParams = "-c:a pcm_s16le"
+                        $audioParams = "-c:a copy"
                     }
                 }
 
                 $vFilterParam = if ($finalYaw -ne 0.0) { "-vf `"v360=e:e:yaw=$finalYaw`"" } else { "" }
                 $vCodecParam = if ($vFilterParam) { "-c:v h264_nvenc -b:v 56000000" } else { "-c:v copy" }
 
+                # If MOV + PCM with no yaw adjustment, directly use official Movie Converter output (preserves 100% native SA3D atom)
                 if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($finalYaw -eq 0.0)) {
                     Move-Item $tempMov $dstFile -Force
                     $muxSuccess = $true
-                } elseif (Test-Path $tempWav) {
-                    $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
-                    cmd.exe /c $ffmpegCmd
-                    $muxSuccess = (Test-Path $dstFile)
                 } elseif (Test-Path $tempMov) {
                     $ffmpegCmd = "ffmpeg -i `"$tempMov`" $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
+                    cmd.exe /c $ffmpegCmd
+                    $muxSuccess = (Test-Path $dstFile)
+                } elseif (Test-Path $tempWav) {
+                    $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                     cmd.exe /c $ffmpegCmd
                     $muxSuccess = (Test-Path $dstFile)
                 } else {

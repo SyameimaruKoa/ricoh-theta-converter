@@ -1,6 +1,6 @@
-# RICOH THETA 完全スタンドアロン動画・静止画 一括変換ツール
+# RICOH THETA 完全スタンドアロン動画・静止画 一括変換・復元ツール
 
-RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画および静止画を、**水平維持・正常な天頂補正・4ch 空間音声展開・Googleフォト撮影日時自動復元・RAMDISK 作業領域対応** で高速かつ安全に一括変換するツールです。
+RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画および静止画を、**水平維持・正常な天頂補正・YouTube/VR公式空間音声 (SA3D内蔵) 対応・Googleフォト撮影日時自動復元・RAMDISK 作業領域対応** で高速かつ安全に一括変換・復元するツールです。
 
 ---
 
@@ -10,23 +10,26 @@ RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画お
    - RICOH THETA 公式エンジン（`DualfishBlender.exe`）を内蔵。
    - 公式標準のジャイロ天頂補正（`-stabilize:-image`）を使用し、公式アプリの手ブレ補正（SLAM）で発生する「映像が斜めに傾く・揺れる」不具合を解消。
 
-2. **RAMDISK（R:\ ドライブ）の自動検出と作業領域の完全 RAM 化（SSD 摩耗ゼロ）**
+2. **YouTube / Google / VR 空間音声（Ambisonics + SA3D）100% 完全対応**
+   - 公式の `RICOH THETA Movie Converter` を用い、YouTube や VR プレイヤーで「頭の向きに合わせて音がリアルタイムに回転する」ために必須となる **`SA3D`（Spatial Audio Box v1）メタデータ** を完全内蔵した公式標準 MOV (PCM 4ch) をデフォルトで生成。
+   - ※ FLAC / MP4 は YouTube 等の空間音声タグパーサーで非対応となるため【スーパー非推奨】に設定。
+
+3. **過去に変換してしまった動画を YouTube 空間音声対応 MOV へ一括復元するツール同梱**
+   - 既に `*_corrected.mp4` 等の非対応形式で変換してしまったファイルや未加工動画から、一発で YouTube 空間音声完全対応の MOV ファイルを再生成・復元する **`Restore-ThetaSpatialMov.bat`** を同梱。
+
+4. **RAMDISK（R:\ ドライブ）の自動検出と作業領域の完全 RAM 化（SSD 摩耗ゼロ）**
    - `R:\` ドライブ（RamDisk）がマウントされている場合、中間ファイル（DualfishBlender の一時 MP4/PNG、Movie Converter の作業領域、PowerShell の中間ファイル等）の生成先を自動的に `R:\ThetaTemp` に切り替えます。
    - 大容量の 360度動画変換に伴う SSD への書き込み負荷を完全にゼロにし、SSD の寿命を強力に保護します。
 
-3. **4ch 空間音声（Ambisonics AmbiX + SA3D）の FLAC / PCM 展開**
-   - RICOH THETA V / Z1 の 4ch マイクで録音された空間音声メタデータを、公式の `RICOH THETA Movie Converter`（`Mp4ConverterLib.dll`）を用いて正確に展開。
-   - 音質劣化ゼロで音声ファイルサイズを約 75% 削減できる **FLAC（可逆圧縮）**、または Movie Converter 標準の **PCM（非圧縮）** を選択可能。
-
-4. **任意の方位角度（ヨー角）または動画タイムコード指定による正面固定**
+5. **任意の方位角度（ヨー角）または動画タイムコード指定による正面固定**
    - 動画全体の「正面」を任意の角度（例: `90°`, `-45°`, `180°`）に回転オフセット固定可能。
    - また、動画内の特定タイムコード（例: `00:00:15` や `15.5` 秒）を指定することで、**その瞬間に見ている方向を動画全体の「正面（0度）」として固定** できます。
 
-5. **Google フォト JSON からの撮影日時・更新日時 自動復元**
+6. **Google フォト JSON からの撮影日時・更新日時 自動復元**
    - Google フォトや Google Takeout からダウンロードした動画・写真は、OS のファイル作成日・更新日がダウンロード日時にリセットされてしまいます。
    - 本ツールは、同一フォルダ内の `<動画名>.json` や EXIF / QuickTime メタデータを自動解析し、**本来の撮影日時にファイルタイムスタンプを完全自動復元** します。
 
-6. **静止画（.JPG）の自動水平化補正**
+7. **静止画（.JPG）の自動水平化補正**
    - 静止画（.JPG）が渡された場合、THETA V のカメラ固有姿勢オフセット（Pitch: -3.0°, Roll: +3.5°）を解消し、水平な 360度パノラマ写真に自動補正します。
 
 ---
@@ -35,8 +38,10 @@ RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画お
 
 ```text
 ricoh-theta-converter/
-├── Convert-ThetaVideo.bat         # ドラッグ＆ドロップ用バッチファイル
+├── Convert-ThetaVideo.bat         # 動画・静止画 一括変換 D&D起動バッチ
 ├── Convert-ThetaVideo.ps1         # 変換メインスクリプト（PowerShell）
+├── Restore-ThetaSpatialMov.bat    # YouTube空間音声MOV 復元・再変換バッチ (D&D対応)
+├── Restore-ThetaSpatialMov.ps1    # 空間音声MOV 復元メインスクリプト
 ├── Setup-ThetaTools.bat           # 初回セットアップバッチ
 ├── Setup-ThetaTools.ps1           # 初回セットアップスクリプト
 ├── README.md                      # 説明書
@@ -49,33 +54,37 @@ ricoh-theta-converter/
 
 ## 使い方
 
-### 方法 1: ドラッグ＆ドロップ（おすすめ）
+### 方法 1: 通常変換（ドラッグ＆ドロップ）
 
-1. 変換したい動画（`.MP4` / `.MOV`）や静止画（`.JPG`）を、`Convert-ThetaVideo.bat` にまとめてドラッグ＆ドロップします。
-2. 動画の場合、対話メニューが表示されます（**すべて Enter キーを押すだけで推奨デフォルト値で即時開始** されます）：
-   * **[1] スタビライズ方式:** `1: 空間方位固定` (推奨) / `2: カメラ正面追従` / `3: 方位完全ロック` / `4: 手ブレ補正ON`
+1. 変換したい動画（`.MP4` / `.MOV`）や静止画（`.JPG`）を、**`Convert-ThetaVideo.bat`** にドラッグ＆ドロップします。
+2. 対話メニューが表示されます（**すべて Enter キーを押すだけで推奨の公式標準 MOV + PCM 4ch 空間音声で即時開始** されます）：
+   * **[1] スタビライズ方式:** `1: 空間方位固定` (推奨/デフォルト) / `2: カメラ正面追従` / `3: 方位完全ロック` / `4: 手ブレ補正ON`
    * **[2] 正面方位調整 (任意):** 角度（`90` / `-45`）または タイムコード（`00:00:15` / `15.5`）を入力（省略時: そのまま）
-   * **[3] 出力形式 (コンテナ):** `1: MP4 (.mp4)` (推奨) / `2: MOV (.mov)`
-   * **[4] 空間音声形式:** `1: FLAC (可逆圧縮 / 容量75%削減)` (推奨) / `2: PCM (非圧縮)` / `3: 通常ステレオ`
-3. 処理完了後、`*_corrected.mp4`（動画）または `*_corrected.jpg`（静止画）が元ファイルと同じフォルダに出力されます。
+   * **[3] 出力形式 (コンテナ):** `1: MOV (.mov)` (YouTube空間音声公式推奨/デフォルト) / `2: MP4 (.mp4)`
+   * **[4] 空間音声形式:** `1: PCM (YouTube空間音声完全対応/デフォルト)` / `2: 通常ステレオ` / `3: 【スーパー非推奨】FLAC`
+3. 処理完了後、`*_corrected.mov`（動画）または `*_corrected.jpg`（静止画）が出力されます。
 
-### 方法 2: PowerShell コマンドライン
+### 方法 2: 空間音声 MOV への復元・一括再変換（ドラッグ＆ドロップ）
+
+過去に MP4 や FLAC 等で変換してしまったファイル（`*_corrected.mp4`）や、生動画（`*.MP4`）を、**YouTube / VR 空間音声（SA3D内蔵）完全対応の公式 MOV へ一発復元** したい場合：
+1. ファイルを **`Restore-ThetaSpatialMov.bat`** にドラッグ＆ドロップします。
+2. 全自動で元動画から公式 4ch 空間音声を抽出し、`*_corrected.mov` を再生成します。
+
+### 方法 3: PowerShell コマンドライン
 
 ```powershell
 # ヘルプの表示
 .\Convert-ThetaVideo.ps1 -h
+.\Restore-ThetaSpatialMov.ps1 -h
 
-# 非対話で 4ch FLAC 空間音声 + MP4 一括変換（R:\ ドライブがあれば自動でRAMDISK作業）
-.\Convert-ThetaVideo.ps1 *.MP4 -Container MP4 -AudioCodec FLAC -Mode Spatial -NonInteractive
+# 非対話で公式標準 MOV (PCM 4ch 空間音声) 一括変換（R:\ があれば自動でRAMDISK作業）
+.\Convert-ThetaVideo.ps1 *.MP4 -NonInteractive
+
+# 変換済み MP4 から YouTube 空間音声 MOV へ一括復元
+.\Restore-ThetaSpatialMov.ps1 *_corrected.mp4 -NonInteractive
 
 # 正面角度を 90度回転して変換
 .\Convert-ThetaVideo.ps1 .\R0010414.MP4 -YawOffset 90 -NonInteractive
-
-# 動画の 15秒時点を正面に固定して変換
-.\Convert-ThetaVideo.ps1 *.MP4 -CenterTime "00:00:15" -NonInteractive
-
-# 任意の RAMDISK パスを指定して変換
-.\Convert-ThetaVideo.ps1 *.MP4 -TempDir "R:\Temp" -NonInteractive
 ```
 
 ---
