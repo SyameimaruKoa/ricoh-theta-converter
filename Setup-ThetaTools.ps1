@@ -86,7 +86,7 @@ if (Test-Path (Join-Path $installedBlenderDir "DualfishBlender.exe")) {
 
     if ($foundSetup) {
         Write-Host "[1/2] $foundSetup から DualfishBlender を抽出中..." -ForegroundColor Yellow
-        $tempExtract = Join-Path [System.IO.Path]::GetTempPath() "theta_setup_extract_$([System.Guid]::NewGuid().ToString('N'))"
+        $tempExtract = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_setup_extract_$([System.Guid]::NewGuid().ToString('N'))")
         New-Item -ItemType Directory -Path $tempExtract -Force | Out-Null
 
         # Extract 7z / exe
@@ -134,7 +134,7 @@ foreach ($c in $mcZipCandidates) {
 
 if ($foundMcZip) {
     Write-Host "[2/2] $foundMcZip から Movie Converter を展開中..." -ForegroundColor Yellow
-    $tempMcExtract = Join-Path [System.IO.Path]::GetTempPath() "theta_mc_extract_$([System.Guid]::NewGuid().ToString('N'))"
+    $tempMcExtract = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_mc_extract_$([System.Guid]::NewGuid().ToString('N'))")
     New-Item -ItemType Directory -Path $tempMcExtract -Force | Out-Null
 
     Expand-Archive -Path $foundMcZip -DestinationPath $tempMcExtract -Force
