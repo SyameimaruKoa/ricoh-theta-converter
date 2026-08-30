@@ -7,16 +7,15 @@
     RICOH THETA Movie Converter のインストーラー (RICOH_THETA_Movie_Converter_ja.zip) から、
     動画変換・天頂補正スティッチ・4ch空間音声展開に必要なバイナリファイルのみを自動抽出し、
     ローカルの tools/ フォルダ配下にポータブル環境として構築します。
+    さらに、PATH 上にあるフル機能版 FFmpeg (NVENC/QSV対応) で同梱の ffmpeg64 を自動アップグレードします。
     公式インストーラーは著作権・ライセンス保護のため本リポジトリには含まれていませんが、
     本スクリプトを実行することで安全にスタンドアロン変換環境を構築できます。
 
 .PARAMETER ThetaSetupPath
-    RICOH THETA PC基本アプリのインストーラーパス (RICOH THETA Setup.exe)。
-    省略時はカレントディレクトリおよび Downloads フォルダから自動検出します。
+    RICOH THETA 基本アプリのインストーラーパス (RICOH THETA Setup.exe)。
 
 .PARAMETER MovieConverterZipPath
-    RICOH THETA Movie Converter の zip / msi パス (RICOH_THETA_Movie_Converter_ja.zip)。
-    省略時はカレントディレクトリおよび Downloads フォルダから自動検出します。
+    RICOH THETA Movie Converter の ZIP パス (RICOH_THETA_Movie_Converter_ja.zip)。
 
 .PARAMETER Help
     ヘルプ情報を表示します (-h または --help)。
@@ -25,179 +24,140 @@
     .\Setup-ThetaTools.ps1
 
 .EXAMPLE
-    .\Setup-ThetaTools.ps1 -ThetaSetupPath .\RICOH_THETA_Setup.exe -MovieConverterZipPath .\RICOH_THETA_Movie_Converter_ja.zip
+    .\Setup-ThetaTools.ps1 -ThetaSetupPath ".\RICOH THETA Setup.exe"
 
 .EXAMPLE
     .\Setup-ThetaTools.ps1 -h
 #>
-[CmdletBinding(DefaultParameterSetName = 'Setup')]
+[CmdletBinding()]
 param (
     #region Parameters
-    [Parameter(ParameterSetName = 'Help')]
-    [Alias('h', '-help')]
-    [switch]$Help,
-
-    [Parameter(ParameterSetName = 'Setup')]
+    [Parameter(Position = 0)]
     [string]$ThetaSetupPath,
 
-    [Parameter(ParameterSetName = 'Setup')]
-    [string]$MovieConverterZipPath
+    [Parameter(Position = 1)]
+    [string]$MovieConverterZipPath,
+
+    [Alias('h', '-help')]
+    [switch]$Help
     #endregion
 )
 
 #region Help Handling
-if ($Help -or ($PSCmdlet.ParameterSetName -eq 'Help')) {
+if ($Help) {
     Get-Help -Name $PSCommandPath -Full
     exit 0
 }
 #endregion
 
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "     RICOH THETA 変換エンジン自動セットアップツール         " -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-
+#region Environment Initialization
 $scriptDir = Split-Path -Parent $PSCommandPath
 $toolsDir = Join-Path $scriptDir "tools"
-$dualfishDir = Join-Path $toolsDir "dualfishblender"
-$movieConverterDir = Join-Path $toolsDir "ricoh_movie_converter"
+$blenderDstDir = Join-Path $toolsDir "dualfishblender"
+$movieConverterDstDir = Join-Path $toolsDir "ricoh_movie_converter"
 
 if (-not (Test-Path $toolsDir)) { New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null }
-if (-not (Test-Path $dualfishDir)) { New-Item -ItemType Directory -Path $dualfishDir -Force | Out-Null }
-if (-not (Test-Path $movieConverterDir)) { New-Item -ItemType Directory -Path $movieConverterDir -Force | Out-Null }
+if (-not (Test-Path $blenderDstDir)) { New-Item -ItemType Directory -Path $blenderDstDir -Force | Out-Null }
+if (-not (Test-Path $movieConverterDstDir)) { New-Item -ItemType Directory -Path $movieConverterDstDir -Force | Out-Null }
 
-#region 1. Setup DualfishBlender (THETA App Stitch Engine)
-Write-Host "`n[1/2] 映像スティッチエンジン (DualfishBlender) のセットアップ..." -ForegroundColor Yellow
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "   RICOH THETA 変換エンジン 自動抽出・セットアップツール   " -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+#endregion
 
-$appDataBlender = Join-Path $env:LOCALAPPDATA "Programs\RicohTheta\resources\tools\dualfishblender\win"
-$dualfishDone = $false
-
-# Search installer if not specified
-if ([string]::IsNullOrWhiteSpace($ThetaSetupPath)) {
-    $searchPaths = @(
-        $scriptDir,
-        ($env:USERPROFILE + "\Downloads"),
-        ($env:USERPROFILE + "\Desktop")
+#region 1. Setup DualfishBlender (RICOH THETA App)
+$installedBlenderDir = Join-Path $env:LOCALAPPDATA "Programs\RicohTheta\resources\tools\dualfishblender\win"
+if (Test-Path (Join-Path $installedBlenderDir "DualfishBlender.exe")) {
+    Write-Host "[1/2] インストール済み RICOH THETA アプリから DualfishBlender をコピー中..." -ForegroundColor Yellow
+    Copy-Item -Path "$installedBlenderDir\*" -Destination $blenderDstDir -Recurse -Force
+    Write-Host "  [OK] DualfishBlender の配置が完了しました。" -ForegroundColor Green
+} else {
+    # Search for Setup.exe
+    $candidates = @(
+        $ThetaSetupPath,
+        (Join-Path $scriptDir "RICOH THETA Setup.exe"),
+        (Join-Path $env:USERPROFILE "Downloads\RICOH THETA Setup.exe"),
+        (Join-Path (Split-Path -Parent $scriptDir) "RICOH THETA Setup.exe")
     )
-    foreach ($sp in $searchPaths) {
-        $found = Get-ChildItem -Path $sp -Filter "*THETA*Setup*.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($found) {
-            $ThetaSetupPath = $found.FullName
-            break
-        }
+    $foundSetup = $null
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { $foundSetup = $c; break }
     }
-}
 
-# Method A: Extract from Installer via 7z
-if ($ThetaSetupPath -and (Test-Path $ThetaSetupPath)) {
-    Write-Host "  インストーラーを検出: $ThetaSetupPath" -ForegroundColor Gray
-    $7zCmd = Get-Command 7z, 7za -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($7zCmd) {
-        $tempRoot = [System.IO.Path]::GetTempPath()
-        $tempExtract = Join-Path $tempRoot ("theta_setup_" + [System.Guid]::NewGuid().ToString('N'))
+    if ($foundSetup) {
+        Write-Host "[1/2] $foundSetup から DualfishBlender を抽出中..." -ForegroundColor Yellow
+        $tempExtract = Join-Path [System.IO.Path]::GetTempPath() "theta_setup_extract_$([System.Guid]::NewGuid().ToString('N'))"
         New-Item -ItemType Directory -Path $tempExtract -Force | Out-Null
-        try {
-            Write-Host "  バイナリを抽出中..." -ForegroundColor Gray
-            & $7zCmd.Source e "$ThetaSetupPath" "`$PLUGINSDIR\app-64.7z" -o"$tempExtract" -y *>$null
-            if (Test-Path "$tempExtract\app-64.7z") {
-                & $7zCmd.Source x "$tempExtract\app-64.7z" "resources\tools\dualfishblender\win\*" -o"$tempExtract\out" -y *>$null
-                $extractedWin = Join-Path $tempExtract "out\resources\tools\dualfishblender\win"
-                if (Test-Path (Join-Path $extractedWin "DualfishBlender.exe")) {
-                    Copy-Item "$extractedWin\*" -Destination $dualfishDir -Recurse -Force
-                    $dualfishDone = $true
-                    Write-Host "  [OK] DualfishBlender の抽出・配置に成功しました。" -ForegroundColor Green
-                }
+
+        # Extract 7z / exe
+        & 7z x "$foundSetup" "-o$tempExtract" -y *>$null
+        $app7z = Get-ChildItem -Path $tempExtract -Filter "app-64.7z" -Recurse | Select-Object -First 1
+        if ($app7z) {
+            $tempApp = Join-Path $tempExtract "app_out"
+            & 7z x "$($app7z.FullName)" "-o$tempApp" -y *>$null
+            $extractedWin = Join-Path $tempApp "resources\tools\dualfishblender\win"
+            if (Test-Path $extractedWin) {
+                Copy-Item -Path "$extractedWin\*" -Destination $blenderDstDir -Recurse -Force
+                Write-Host "  [OK] インストーラーからの抽出が完了しました。" -ForegroundColor Green
             }
-        } finally {
-            Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
         }
+        Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "  [!] RICOH THETA Setup.exe が見つかりませんでした (手動配置またはダウンロードが必要です)。" -ForegroundColor DarkYellow
     }
 }
 
-# Method B: Fallback from already installed AppData
-if (-not $dualfishDone -and (Test-Path (Join-Path $appDataBlender "DualfishBlender.exe"))) {
-    Write-Host "  既存のインストール環境からコピー中: $appDataBlender" -ForegroundColor Gray
-    Copy-Item "$appDataBlender\*" -Destination $dualfishDir -Recurse -Force
-    $dualfishDone = $true
-    Write-Host "  [OK] インストール環境からのコピーに成功しました。" -ForegroundColor Green
-}
-
-if (-not $dualfishDone) {
-    Write-Warning "  [WARN] DualfishBlender の取得に失敗しました。RICOH THETA Setup.exe を配置するか、RICOH THETA アプリをインストールしてください。"
-}
-#endregion
-
-#region 2. Setup RICOH THETA Movie Converter (Spatial Audio Engine)
-Write-Host "`n[2/2] 4ch 空間音声エンジン (RICOH THETA Movie Converter) のセットアップ..." -ForegroundColor Yellow
-
-$mcDone = $false
-
-# Search movie converter archive if not specified
-if ([string]::IsNullOrWhiteSpace($MovieConverterZipPath)) {
-    $searchPaths = @(
-        $scriptDir,
-        ($env:USERPROFILE + "\Downloads"),
-        ($env:USERPROFILE + "\Desktop")
-    )
-    foreach ($sp in $searchPaths) {
-        $found = Get-ChildItem -Path $sp -Filter "*Movie_Converter*.zip" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($found) {
-            $MovieConverterZipPath = $found.FullName
-            break
-        }
-        $foundMsi = Get-ChildItem -Path $sp -Filter "*Installer*.msi" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($foundMsi) {
-            $MovieConverterZipPath = $foundMsi.FullName
-            break
-        }
-    }
-}
-
-if ($MovieConverterZipPath -and (Test-Path $MovieConverterZipPath)) {
-    Write-Host "  インストーラーを検出: $MovieConverterZipPath" -ForegroundColor Gray
-    $tempRoot = [System.IO.Path]::GetTempPath()
-    $tempMc = Join-Path $tempRoot ("theta_mc_" + [System.Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tempMc -Force | Out-Null
+# Auto-upgrade ffmpeg64 with full-featured system ffmpeg (NVENC / QSV support)
+$targetBundledFfmpeg = Join-Path $blenderDstDir "ffmpeg64\ffmpeg.exe"
+if (Test-Path $targetBundledFfmpeg) {
     try {
-        $msiFile = $null
-        if ($MovieConverterZipPath.EndsWith(".zip", [System.StringComparison]::OrdinalIgnoreCase)) {
-            Write-Host "  Zip を展開中..." -ForegroundColor Gray
-            Expand-Archive -Path $MovieConverterZipPath -DestinationPath $tempMc -Force
-            $msiFile = (Get-ChildItem -Path $tempMc -Filter "*.msi" -Recurse | Select-Object -First 1).FullName
-        } elseif ($MovieConverterZipPath.EndsWith(".msi", [System.StringComparison]::OrdinalIgnoreCase)) {
-            $msiFile = $MovieConverterZipPath
+        $sysFfmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+        if ($sysFfmpeg) {
+            Copy-Item -Path $sysFfmpeg.Source -Destination $targetBundledFfmpeg -Force
+            Write-Host "  [OK] システムのフル機能版 FFmpeg (NVENC/QSV対応) でアップグレード完了。" -ForegroundColor Green
         }
-
-        if ($msiFile -and (Test-Path $msiFile)) {
-            Write-Host "  MSI から必要ファイルを抽出中..." -ForegroundColor Gray
-            $adminOut = Join-Path $tempMc "admin_out"
-            New-Item -ItemType Directory -Path $adminOut -Force | Out-Null
-            $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/a `"$msiFile`" /qn TARGETDIR=`"$adminOut`"" -Wait -PassThru
-            
-            $sourceBin = (Get-ChildItem -Path $adminOut -Filter "RICOH THETA Movie Converter.exe" -Recurse | Select-Object -First 1).DirectoryName
-            if ($sourceBin -and (Test-Path (Join-Path $sourceBin "RICOH THETA Movie Converter.exe"))) {
-                Copy-Item "$sourceBin\*" -Destination $movieConverterDir -Recurse -Force
-                $mcDone = $true
-                Write-Host "  [OK] Movie Converter ランタイムの抽出・配置に成功しました。" -ForegroundColor Green
-            }
-        }
-    } finally {
-        Remove-Item $tempMc -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-if (-not $mcDone -and (Test-Path (Join-Path $movieConverterDir "RICOH THETA Movie Converter.exe"))) {
-    $mcDone = $true
-    Write-Host "  [OK] 既存の Movie Converter ランタイムを確認しました。" -ForegroundColor Green
-}
-
-if (-not $mcDone) {
-    Write-Warning "  [WARN] RICOH THETA Movie Converter の取得に失敗しました。RICOH_THETA_Movie_Converter_ja.zip を配置してください。"
+    } catch { }
 }
 #endregion
 
-#region Summary & Verification
+#region 2. Setup RICOH THETA Movie Converter
+$mcZipCandidates = @(
+    $MovieConverterZipPath,
+    (Join-Path $scriptDir "RICOH_THETA_Movie_Converter_ja.zip"),
+    (Join-Path $env:USERPROFILE "Downloads\RICOH_THETA_Movie_Converter_ja.zip"),
+    (Join-Path (Split-Path -Parent $scriptDir) "RICOH_THETA_Movie_Converter_ja.zip")
+)
+$foundMcZip = $null
+foreach ($c in $mcZipCandidates) {
+    if ($c -and (Test-Path $c)) { $foundMcZip = $c; break }
+}
+
+if ($foundMcZip) {
+    Write-Host "[2/2] $foundMcZip から Movie Converter を展開中..." -ForegroundColor Yellow
+    $tempMcExtract = Join-Path [System.IO.Path]::GetTempPath() "theta_mc_extract_$([System.Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $tempMcExtract -Force | Out-Null
+
+    Expand-Archive -Path $foundMcZip -DestinationPath $tempMcExtract -Force
+    $msiFile = Get-ChildItem -Path $tempMcExtract -Filter "*.msi" -Recurse | Select-Object -First 1
+    if ($msiFile) {
+        $msiOut = Join-Path $tempMcExtract "msi_out"
+        Start-Process msiexec.exe -ArgumentList "/a `"$($msiFile.FullName)`" /qn TARGETDIR=`"$msiOut`"" -Wait
+        $mcFiles = Get-ChildItem -Path $msiOut -Filter "RICOH THETA Movie Converter.exe" -Recurse | Select-Object -First 1
+        if ($mcFiles) {
+            $mcSrcDir = $mcFiles.DirectoryName
+            Copy-Item -Path "$mcSrcDir\*" -Destination $movieConverterDstDir -Recurse -Force
+            Write-Host "  [OK] Movie Converter の抽出が完了しました。" -ForegroundColor Green
+        }
+    }
+    Remove-Item -Path $tempMcExtract -Recurse -Force -ErrorAction SilentlyContinue
+} else {
+    Write-Host "  [!] RICOH_THETA_Movie_Converter_ja.zip が見つかりませんでした (手動配置またはダウンロードが必要です)。" -ForegroundColor DarkYellow
+}
+#endregion
+
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "セットアップ完了確認:" -ForegroundColor Cyan
-Write-Host "  - 映像スティッチエンジン : $(if (Test-Path (Join-Path $dualfishDir "DualfishBlender.exe")) { '[OK] 利用可能' } else { '[NG] 未設定' })" -ForegroundColor $(if (Test-Path (Join-Path $dualfishDir "DualfishBlender.exe")) { 'Green' } else { 'Red' })
-Write-Host "  - 4ch 空間音声エンジン   : $(if (Test-Path (Join-Path $movieConverterDir "RICOH THETA Movie Converter.exe")) { '[OK] 利用可能' } else { '[NG] 未設定' })" -ForegroundColor $(if (Test-Path (Join-Path $movieConverterDir "RICOH THETA Movie Converter.exe")) { 'Green' } else { 'Red' })
+Write-Host "セットアップ処理が完了しました。" -ForegroundColor Green
+Write-Host "tools/ フォルダの状態:" -ForegroundColor White
+Write-Host "  - DualfishBlender : $(if (Test-Path (Join-Path $blenderDstDir 'DualfishBlender.exe')) { 'Ready (OK)' } else { 'Missing' })" -ForegroundColor $(if (Test-Path (Join-Path $blenderDstDir 'DualfishBlender.exe')) { 'Green' } else { 'Red' })
+Write-Host "  - Movie Converter : $(if (Test-Path (Join-Path $movieConverterDstDir 'RICOH THETA Movie Converter.exe')) { 'Ready (OK)' } else { 'Missing' })" -ForegroundColor $(if (Test-Path (Join-Path $movieConverterDstDir 'RICOH THETA Movie Converter.exe')) { 'Green' } else { 'Red' })
 Write-Host "============================================================" -ForegroundColor Cyan

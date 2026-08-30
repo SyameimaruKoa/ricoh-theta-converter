@@ -8,7 +8,7 @@
     4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
     MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
     任意の方位角度（度）または動画タイムコード指定による正面位置の固定、
-    dGPU (NVIDIA/AMD) + iGPU のマルチGPU検出と GPU エンコーダー選択、
+    dGPU (NVIDIA/AMD) + iGPU のマルチGPU検出と GPU エンコーダー選択 (NVENC/QSV/CPU)、
     SSD書き込みを最小限に抑える中間ファイル自動整理、および
     GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
     また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
@@ -123,11 +123,25 @@ if (Test-Path $localBlender) {
     exit 1
 }
 
-# 2. RICOH THETA Movie Converter path
+# 2. Upgrade bundled ffmpeg with system ffmpeg if needed (enables NVENC / QSV support)
+$bundledFfmpeg = Join-Path $resourcesPath "ffmpeg64\ffmpeg.exe"
+if (Test-Path $bundledFfmpeg) {
+    try {
+        $hasNvenc = (& "$bundledFfmpeg" -encoders 2>$null | Select-String "h264_nvenc")
+        if (-not $hasNvenc) {
+            $sysFfmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            if ($sysFfmpegCmd) {
+                Copy-Item -Path $sysFfmpegCmd.Source -Destination $bundledFfmpeg -Force
+            }
+        }
+    } catch { }
+}
+
+# 3. RICOH THETA Movie Converter path
 $movieConverterDir = Join-Path $scriptDir "tools\ricoh_movie_converter"
 $hasMovieConverter = (Test-Path (Join-Path $movieConverterDir "RICOH THETA Movie Converter.exe")) -and (Test-Path (Join-Path $movieConverterDir "Mp4ConverterLib.dll"))
 
-# 3. Detect all GPUs on the system (dGPU + iGPU)
+# 4. Detect all GPUs on the system (dGPU + iGPU)
 $gpuList = [System.Collections.Generic.List[string]]::new()
 try {
     $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
@@ -138,7 +152,7 @@ try {
     }
 } catch { }
 
-# 4. Check DualfishBlender showCapability
+# 5. Check DualfishBlender showCapability
 $detectedGpu = "Auto"
 try {
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -345,7 +359,7 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     # 6. Encoder selection
     if ([string]::IsNullOrWhiteSpace($Encoder)) {
         Write-Host "`n[6] エンコーダー (GPUアクセラレーション) を選択してください:" -ForegroundColor Yellow
-        Write-Host "  1: 自動検出 (DualfishBlenderに任せる) [デフォルト]"
+        Write-Host "  1: 自動検出 (DualfishBlender標準 / 推奨・安定) [デフォルト]"
         Write-Host "  2: NVIDIA NVENC (GeForce RTX/GTX 高速GPUエンコード) [-encodeFFmpeg:nvenc]"
         Write-Host "  3: Intel QuickSync (QSV ハードウェアエンコード) [-encodeFFmpeg:qsv]"
         Write-Host "  4: CPU ソフトウェアエンコード [-encodeFFmpeg:libx]"
