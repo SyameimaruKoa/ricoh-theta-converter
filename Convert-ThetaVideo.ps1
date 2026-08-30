@@ -1,42 +1,42 @@
 ﻿<#
 .SYNOPSIS
-    RICOH THETA??????????????????????4ch????(FLAC)???????????
+    RICOH THETAの動画・静止画を対話型設定・正常な天頂補正・4ch空間音声(FLAC)展開で一括変換します。
 
 .DESCRIPTION
-    RICOH THETA???????DualfishBlender.exe???? RICOH THETA Movie Converter ?????
-    ?????????????????????????360?Equirectangular?????????
-    4ch ?????First-Order Ambisonics AmbiX + SA3D?? FLAC(????)/PCM(???)???
-    MP4 / MOV ?????????????/???????/???????????H.265??????GPU?????????
-    SSD??????????????????????????
-    ????????????EXIF????????????????Google???????????????
-    ???????.JPG??????????????????????????????????
+    RICOH THETA公式エンジン（DualfishBlender.exe）および RICOH THETA Movie Converter を内蔵し、
+    手ブレ補正による映像の傾き不具合を解消した高品質な360度Equirectangular動画を生成します。
+    4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
+    MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロックの切り替え、H.265コーデック、GPUエンコーダー選択、
+    SSD書き込みを最小限に抑える中間ファイル自動整理、および
+    ファイル作成日・更新日・EXIF撮影日メタデータの完全引き継ぎ（Googleフォト対応）に対応しています。
+    また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
 
 .PARAMETER Path
-    ?????RICOH THETA????????????????????????????????????
+    変換対象のRICOH THETA動画・静止画ファイルパス（複数指定、ワイルドカード、パイプライン対応）。
 
 .PARAMETER Mode
-    ???????????????Spatial: ?????? / Camera: ??????? / Lock: ???????
+    スタビライズ・方位固定モード（Spatial: 空間方位固定 / Camera: カメラ正面追従 / Lock: 方位ロック）。
 
 .PARAMETER Codec
-    ??????????H264 / H265??
+    出力動画コーデック（H264 / H265）。
 
 .PARAMETER Encoder
-    ?????????Auto / NVENC / QSV / CPU / AMF??
+    エンコーダー指定（Auto / NVENC / QSV / CPU / AMF）。
 
 .PARAMETER Container
-    ?????????MP4 / MOV??
+    出力コンテナ形式（MP4 / MOV）。
 
 .PARAMETER AudioCodec
-    ????????FLAC: ??????? / PCM: ??? / Stereo: ????????
+    音声コーデック（FLAC: 可逆圧縮軽量化 / PCM: 非圧縮 / Stereo: 通常ステレオ）。
 
 .PARAMETER OutputDir
-    ????????????????????????????
+    出力先ディレクトリ（省略時は元ファイルと同じフォルダ）。
 
 .PARAMETER NonInteractive
-    ???????????????????????????????????????????
+    対話プロンプトを表示せず、指定されたパラメータ（またはデフォルト値）で即時実行します。
 
 .PARAMETER Help
-    ????????????-h ??? --help??
+    ヘルプ情報を表示します（-h または --help）。
 
 .EXAMPLE
     .\Convert-ThetaVideo.ps1 -Path .\R0010414.MP4
@@ -115,7 +115,7 @@ if (Test-Path $localBlender) {
     $blenderPath = $appDataBlender
     $resourcesPath = [System.IO.Path]::GetDirectoryName((Split-Path -Parent $blenderPath))
 } else {
-    Write-Error "DualfishBlender.exe not found in local tools or AppData."
+    Write-Error "DualfishBlender.exe が見つかりません。Setup-ThetaTools.bat を実行してセットアップを行ってください。"
     exit 1
 }
 
@@ -163,7 +163,7 @@ if ($Path) {
 }
 
 if ($inputFiles.Count -eq 0) {
-    Write-Host "No input video or image files provided." -ForegroundColor Yellow
+    Write-Host "処理対象の動画または静止画ファイルが指定されていません。" -ForegroundColor Yellow
     Get-Help -Name $PSCommandPath -Full
     exit 0
 }
@@ -184,25 +184,25 @@ foreach ($f in $inputFiles) {
 #region Interactive Menu
 if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWhiteSpace($Mode) -or [string]::IsNullOrWhiteSpace($Codec) -or [string]::IsNullOrWhiteSpace($Encoder) -or [string]::IsNullOrWhiteSpace($Container) -or [string]::IsNullOrWhiteSpace($AudioCodec))) {
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "        RICOH THETA ????????????????        " -ForegroundColor Cyan
+    Write-Host "        RICOH THETA 完全スタンドアロン一括変換ツール        " -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "??????: $($videoFiles.Count) ?, ???????: $($imageFiles.Count) ?" -ForegroundColor White
+    Write-Host "動画ファイル: $($videoFiles.Count) 件, 静止画ファイル: $($imageFiles.Count) 件" -ForegroundColor White
     foreach ($f in $inputFiles) {
         Write-Host "  - $([System.IO.Path]::GetFileName($f))" -ForegroundColor Gray
     }
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "??????????? : ?? (DualfishBlender)" -ForegroundColor Green
-    Write-Host "????????       : $(if ($hasMovieConverter) { '?? (Ambisonics AmbiX + SA3D)' } else { '??? (??????)' })" -ForegroundColor Green
-    Write-Host "?????GPU??      : $detectedGpu" -ForegroundColor Green
+    Write-Host "映像スティッチエンジン : 内蔵 (DualfishBlender)" -ForegroundColor Green
+    Write-Host "空間音声エンジン       : $(if ($hasMovieConverter) { '内蔵 (Ambisonics AmbiX + SA3D)' } else { '未検出 (ステレオのみ)' })" -ForegroundColor Green
+    Write-Host "検出されたGPU環境      : $detectedGpu" -ForegroundColor Green
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
 
     # 1. Mode selection
     if ([string]::IsNullOrWhiteSpace($Mode)) {
-        Write-Host "`n[1] ?????? / ????????????????:" -ForegroundColor Yellow
-        Write-Host "  1: ?????? (???????? + ??????, ????OFF) [-stabilize:-image] [??/?????]"
-        Write-Host "  2: ??????? (???????? + ??????????) [-stabilize:off]"
-        Write-Host "  3: ??????? (???????? + ?????????????) [-stabilize:lock]"
-        $modeChoice = Read-Host "?? [1-3] (?????: 1)"
+        Write-Host "`n[1] スタビライズ / 方位固定モードを選択してください:" -ForegroundColor Yellow
+        Write-Host "  1: 空間方位固定 (ジャイロ天頂補正 + 空間方位固定, 画像認識OFF) [-stabilize:-image] [推奨/デフォルト]"
+        Write-Host "  2: カメラ正面追従 (ジャイロ天頂補正 + カメラレンズ正面追従) [-stabilize:off]"
+        Write-Host "  3: 方位完全ロック (ジャイロ天頂補正 + 撮影開始時の方位完全ロック) [-stabilize:lock]"
+        $modeChoice = Read-Host "選択 [1-3] (デフォルト: 1)"
         switch ($modeChoice.Trim()) {
             '2' { $Mode = 'Camera' }
             '3' { $Mode = 'Lock' }
@@ -212,10 +212,10 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
 
     # 2. Codec selection
     if ([string]::IsNullOrWhiteSpace($Codec)) {
-        Write-Host "`n[2] ??????????????????:" -ForegroundColor Yellow
-        Write-Host "  1: H.264 (AVC) - ????? [?????]"
-        Write-Host "  2: H.265 (HEVC) - ??? / ??? [-enableH265]"
-        $codecChoice = Read-Host "?? [1-2] (?????: 1)"
+        Write-Host "`n[2] 出力動画コーデックを選択してください:" -ForegroundColor Yellow
+        Write-Host "  1: H.264 (AVC) - 互換性重視 [デフォルト]"
+        Write-Host "  2: H.265 (HEVC) - 高画質 / 小容量 [-enableH265]"
+        $codecChoice = Read-Host "選択 [1-2] (デフォルト: 1)"
         switch ($codecChoice.Trim()) {
             '2' { $Codec = 'H265' }
             default { $Codec = 'H264' }
@@ -224,10 +224,10 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
 
     # 3. Container selection
     if ([string]::IsNullOrWhiteSpace($Container)) {
-        Write-Host "`n[3] ???????? (????) ?????????:" -ForegroundColor Yellow
-        Write-Host "  1: MP4 (.mp4) - ???YouTube?Google????VR?? [?????]"
-        Write-Host "  2: MOV (.mov) - QuickTime / Apple??"
-        $containerChoice = Read-Host "?? [1-2] (?????: 1)"
+        Write-Host "`n[3] 出力ファイル形式 (コンテナ) を選択してください:" -ForegroundColor Yellow
+        Write-Host "  1: MP4 (.mp4) - 汎用・YouTube・Googleフォト・VR標準 [デフォルト]"
+        Write-Host "  2: MOV (.mov) - QuickTime / Apple互換"
+        $containerChoice = Read-Host "選択 [1-2] (デフォルト: 1)"
         switch ($containerChoice.Trim()) {
             '2' { $Container = 'MOV' }
             default { $Container = 'MP4' }
@@ -237,11 +237,11 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     # 4. Audio Codec selection
     if ([string]::IsNullOrWhiteSpace($AudioCodec)) {
         if ($hasMovieConverter) {
-            Write-Host "`n[4] ???? (Ambisonics 4ch) ???????????????:" -ForegroundColor Yellow
-            Write-Host "  1: FLAC (???? / ????????????75%??) [??/?????]"
-            Write-Host "  2: PCM (??? 3072kbps / Movie Converter??)"
-            Write-Host "  3: ???????? (??????)"
-            $audioChoice = Read-Host "?? [1-3] (?????: 1)"
+            Write-Host "`n[4] 空間音声 (Ambisonics 4ch) のコーデックを選択してください:" -ForegroundColor Yellow
+            Write-Host "  1: FLAC (可逆圧縮 / 音質劣化ゼロ・音声容量約75%削減) [推奨/デフォルト]"
+            Write-Host "  2: PCM (非圧縮 3072kbps / Movie Converter標準)"
+            Write-Host "  3: 通常ステレオ音声 (空間音声なし)"
+            $audioChoice = Read-Host "選択 [1-3] (デフォルト: 1)"
             switch ($audioChoice.Trim()) {
                 '2' { $AudioCodec = 'PCM' }
                 '3' { $AudioCodec = 'Stereo' }
@@ -254,12 +254,12 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
 
     # 5. Encoder selection
     if ([string]::IsNullOrWhiteSpace($Encoder)) {
-        Write-Host "`n[5] ?????? (GPU?????????) ?????????:" -ForegroundColor Yellow
-        Write-Host "  1: ???? (DualfishBlender????) [?????]"
-        Write-Host "  2: NVIDIA NVENC (GeForce RTX/GTX ??GPU?????) [-encodeFFmpeg:nvenc]"
-        Write-Host "  3: Intel QuickSync (QSV ???????????) [-encodeFFmpeg:qsv]"
-        Write-Host "  4: CPU ??????????? [-encodeFFmpeg:libx]"
-        $encChoice = Read-Host "?? [1-4] (?????: 1)"
+        Write-Host "`n[5] エンコーダー (GPUアクセラレーション) を選択してください:" -ForegroundColor Yellow
+        Write-Host "  1: 自動検出 (DualfishBlenderに任せる) [デフォルト]"
+        Write-Host "  2: NVIDIA NVENC (GeForce RTX/GTX 高速GPUエンコード) [-encodeFFmpeg:nvenc]"
+        Write-Host "  3: Intel QuickSync (QSV ハードウェアエンコード) [-encodeFFmpeg:qsv]"
+        Write-Host "  4: CPU ソフトウェアエンコード [-encodeFFmpeg:libx]"
+        $encChoice = Read-Host "選択 [1-4] (デフォルト: 1)"
         switch ($encChoice.Trim()) {
             '2' { $Encoder = 'NVENC' }
             '3' { $Encoder = 'QSV' }
@@ -315,14 +315,14 @@ function Invoke-ExtractSpatialWav {
         [string]$TempMov
     )
     $runnerScript = @"
-Environment.CurrentDirectory = '$($McDir.Replace('', '\'))';
-`$asm = [System.Reflection.Assembly]::LoadFrom(Join-Path '$($McDir.Replace('', '\'))' 'RICOH THETA Movie Converter.exe')
+Environment.CurrentDirectory = '$($McDir.Replace('\', '\\'))';
+`$asm = [System.Reflection.Assembly]::LoadFrom(Join-Path '$($McDir.Replace('\', '\\'))' 'RICOH THETA Movie Converter.exe')
 `$t = `$asm.GetType('Ricoh_Mp4Converter.Mp4Converter')
 `$instance = [System.Activator]::CreateInstance(`$t)
 `$initM = `$t.GetMethod('InitializeFfmpeg')
 if (`$initM) { `$initM.Invoke(`$instance, `$null) }
 `$convM = `$t.GetMethod('ConvertFile')
-`$res = `$convM.Invoke(`$instance, @('$($InputMp4.Replace('', '\'))', '$($TempWav.Replace('', '\'))', '$($TempMov.Replace('', '\'))'))
+`$res = `$convM.Invoke(`$instance, @('$($InputMp4.Replace('\', '\\'))', '$($TempWav.Replace('\', '\\'))', '$($TempMov.Replace('\', '\\'))'))
 exit [int]`$res
 "@
     $x86PowerShell = Join-Path $env:SystemRoot "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
@@ -346,12 +346,12 @@ exit [int]`$res
 #region Batch Execution - Videos
 if ($videoFiles.Count -gt 0) {
     Write-Host "`n============================================================" -ForegroundColor Cyan
-    Write-Host "??????:" -ForegroundColor Green
-    Write-Host "  - ?????? : $Mode ($($optionList[0]))" -ForegroundColor White
-    Write-Host "  - ?????   : $Codec" -ForegroundColor White
-    Write-Host "  - ?????? : $Container (.$($Container.ToLowerInvariant()))" -ForegroundColor White
-    Write-Host "  - ?????   : $AudioCodec $(if ($AudioCodec -ne 'Stereo') { '(4ch ???? Ambisonics)' })" -ForegroundColor White
-    Write-Host "  - ?????? : $Encoder" -ForegroundColor White
+    Write-Host "動画変換設定:" -ForegroundColor Green
+    Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
+    Write-Host "  - コーデック   : $Codec" -ForegroundColor White
+    Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant()))" -ForegroundColor White
+    Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -ne 'Stereo') { '(4ch 空間音声 Ambisonics)' })" -ForegroundColor White
+    Write-Host "  - エンコーダー : $Encoder" -ForegroundColor White
     Write-Host "============================================================" -ForegroundColor Cyan
 
     $vIdx = 0
@@ -363,8 +363,8 @@ if ($videoFiles.Count -gt 0) {
         $ext = "." + $Container.ToLowerInvariant()
         $dstFile = [System.IO.Path]::Combine($dir, "${baseName}_corrected$ext")
 
-        Write-Host "`n[?? $vIdx/$($videoFiles.Count)] ????: $($srcItem.Name)" -ForegroundColor Cyan
-        Write-Host "  ?????: $dstFile" -ForegroundColor Gray
+        Write-Host "`n[動画 $vIdx/$($videoFiles.Count)] 処理開始: $($srcItem.Name)" -ForegroundColor Cyan
+        Write-Host "  最終出力先: $dstFile" -ForegroundColor Gray
 
         if (Test-Path $dstFile) {
             Remove-Item $dstFile -Force
@@ -378,7 +378,7 @@ if ($videoFiles.Count -gt 0) {
             $tempWav = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_audio_${baseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
             $tempMov = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_mov_${baseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
 
-            Write-Host "  (1/3) ??????????????..." -ForegroundColor Yellow
+            Write-Host "  (1/3) 映像天頂補正スティッチ実行中..." -ForegroundColor Yellow
             $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$tempStitch`""
             $pinfo = New-Object System.Diagnostics.ProcessStartInfo
             $pinfo.FileName = $blenderPath
@@ -389,10 +389,10 @@ if ($videoFiles.Count -gt 0) {
             $procBlender.WaitForExit()
 
             if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
-                Write-Host "  (2/3) 4ch ????(Ambisonics AmbiX)???..." -ForegroundColor Yellow
+                Write-Host "  (2/3) 4ch 空間音声(Ambisonics AmbiX)展開中..." -ForegroundColor Yellow
                 $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -InputMp4 $tempStitch -TempWav $tempWav -TempMov $tempMov
 
-                Write-Host "  (3/3) ?? + 4ch ????($AudioCodec)???..." -ForegroundColor Yellow
+                Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
 
                 # Audio encoding parameters
                 # Use -f mp4 to allow 4ch FLAC in both .mp4 and .mov container targets
@@ -438,13 +438,13 @@ if ($videoFiles.Count -gt 0) {
                     $dstItem.LastWriteTime = $srcItem.LastWriteTime
                     $dstItem.LastAccessTime = $srcItem.LastAccessTime
                     $stopwatch.Stop()
-                    Write-Host "  [OK] ?? ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))?) - 4ch $AudioCodec ????????????????" -ForegroundColor Green
+                    Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 4ch $AudioCodec 空間音声・タイムスタンプ同期完了" -ForegroundColor Green
                 } else {
-                    Write-Error "  [NG] ???????????????"
+                    Write-Error "  [NG] 空間音声の結合に失敗しました。"
                 }
             } else {
                 Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
-                Write-Error "  [NG] DualfishBlender ????????????????? (ExitCode: $($procBlender.ExitCode))"
+                Write-Error "  [NG] DualfishBlender による映像スティッチに失敗しました (ExitCode: $($procBlender.ExitCode))"
             }
         } else {
             # Standard video-only conversion
@@ -462,9 +462,9 @@ if ($videoFiles.Count -gt 0) {
                 $dstItem.CreationTime = $srcItem.CreationTime
                 $dstItem.LastWriteTime = $srcItem.LastWriteTime
                 $dstItem.LastAccessTime = $srcItem.LastAccessTime
-                Write-Host "  [OK] ???? ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))?) - ???????????" -ForegroundColor Green
+                Write-Host "  [OK] 変換完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムスタンプ同期完了" -ForegroundColor Green
             } else {
-                Write-Error "  [NG] DualfishBlender ?????????? (ExitCode: $($procBlender.ExitCode))"
+                Write-Error "  [NG] DualfishBlender がエラー終了しました (ExitCode: $($procBlender.ExitCode))"
             }
         }
     }
@@ -474,7 +474,7 @@ if ($videoFiles.Count -gt 0) {
 #region Batch Execution - Images
 if ($imageFiles.Count -gt 0) {
     Write-Host "`n============================================================" -ForegroundColor Cyan
-    Write-Host "????????? (?????????? Pitch: -3.0?, Roll: +3.5?):" -ForegroundColor Green
+    Write-Host "静止画自動水平補正 (カメラ固有オフセット Pitch: -3.0°, Roll: +3.5°):" -ForegroundColor Green
     Write-Host "============================================================" -ForegroundColor Cyan
 
     $imgIdx = 0
@@ -485,8 +485,8 @@ if ($imageFiles.Count -gt 0) {
         $baseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name)
         $dstFile = [System.IO.Path]::Combine($dir, "${baseName}_corrected.jpg")
 
-        Write-Host "`n[??? $imgIdx/$($imageFiles.Count)] ?????: $($srcItem.Name)" -ForegroundColor Cyan
-        Write-Host "  ???: $dstFile" -ForegroundColor Gray
+        Write-Host "`n[静止画 $imgIdx/$($imageFiles.Count)] 水平補正中: $($srcItem.Name)" -ForegroundColor Cyan
+        Write-Host "  出力先: $dstFile" -ForegroundColor Gray
 
         if (Test-Path $dstFile) {
             Remove-Item $dstFile -Force
@@ -503,14 +503,14 @@ if ($imageFiles.Count -gt 0) {
             $dstItem.CreationTime = $srcItem.CreationTime
             $dstItem.LastWriteTime = $srcItem.LastWriteTime
             $dstItem.LastAccessTime = $srcItem.LastAccessTime
-            Write-Host "  [OK] ????? - 360???????????????????" -ForegroundColor Green
+            Write-Host "  [OK] 水平化完了 - 360度パノラマタグ・タイムスタンプ同期完了" -ForegroundColor Green
         } else {
-            Write-Error "  [NG] ????????????????"
+            Write-Error "  [NG] 静止画の水平補正に失敗しました。"
         }
     }
 }
 #endregion
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "????????????? (??: $($videoFiles.Count) ?, ???: $($imageFiles.Count) ?)" -ForegroundColor Green
+Write-Host "すべての処理が完了しました (動画: $($videoFiles.Count) 件, 静止画: $($imageFiles.Count) 件)" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
