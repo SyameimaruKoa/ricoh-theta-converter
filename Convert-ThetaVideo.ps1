@@ -5,10 +5,10 @@
 .DESCRIPTION
     RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
     純正パイプラインを100%そのまま使用し、独自のバイナリ操作を行うことなく高品質な360度Equirectangular動画を生成します。
+    RAMDISK（R:\ 等）の自動検出と中間作業領域の完全RAM化に対応し、SSD書き込み寿命を強力に保護します。
     4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
     MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
     任意の方位角度（度）または動画タイムコード指定による正面位置の固定、
-    SSD書き込みを最小限に抑える中間ファイル自動整理、および
     GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
     また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
 
@@ -33,6 +33,9 @@
 .PARAMETER OutputDir
     出力先ディレクトリ（省略時は元ファイルと同じフォルダ）。
 
+.PARAMETER TempDir
+    中間ファイル作成用の一時ディレクトリ（RAMDISKなど。省略時は R:\ ドライブが存在すれば自動使用、なければシステムTEMP）。
+
 .PARAMETER NonInteractive
     対話プロンプトを表示せず、指定されたパラメータ（またはデフォルト値）で即時実行します。
 
@@ -46,7 +49,7 @@
     .\Convert-ThetaVideo.ps1 *.MP4 -Mode Spatial -YawOffset 90 -NonInteractive
 
 .EXAMPLE
-    .\Convert-ThetaVideo.ps1 *.MP4 -CenterTime "00:00:15" -NonInteractive
+    .\Convert-ThetaVideo.ps1 *.MP4 -CenterTime "00:00:15" -TempDir "R:\Temp" -NonInteractive
 
 .EXAMPLE
     .\Convert-ThetaVideo.ps1 -h
@@ -72,6 +75,8 @@ param (
 
     [string]$OutputDir,
 
+    [string]$TempDir,
+
     [switch]$NonInteractive,
 
     [Alias('h', '-help')]
@@ -90,6 +95,39 @@ if ($Help -or (-not $Path -and -not $NonInteractive)) {
 $env:SHIM_MCCOMPAT = "0x0000000000000001"
 $env:CUDA_VISIBLE_DEVICES = "0"
 $env:__NV_PRIME_RENDER_OFFLOAD = "1"
+#endregion
+
+#region Setup RAMDISK / Working Temp Directory (Zero SSD Wear)
+$workingTempDir = ""
+$isRamDisk = $false
+
+if ($TempDir -and (Test-Path $TempDir)) {
+    $workingTempDir = (Resolve-Path $TempDir).Path
+} elseif (Test-Path "R:\") {
+    $workingTempDir = "R:\ThetaTemp"
+    $isRamDisk = $true
+} else {
+    $workingTempDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "ThetaTemp")
+}
+
+if (-not (Test-Path $workingTempDir)) {
+    New-Item -Path $workingTempDir -ItemType Directory -Force | Out-Null
+}
+
+# Redirect process-level TEMP and TMP so DualfishBlender, ffmpeg, and Movie Converter use RAMDISK
+$env:TEMP = $workingTempDir
+$env:TMP = $workingTempDir
+
+$tempFreeGb = 0.0
+try {
+    $driveLetter = $workingTempDir.Substring(0, 1)
+    $drv = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
+    if ($drv) {
+        $tempFreeGb = [Math]::Round($drv.Free / 1GB, 1)
+    }
+} catch { }
+
+$tempDisplayStr = "$workingTempDir $(if ($isRamDisk) { '(RAMDISK 検出・SSD書き込み完全ゼロ)' }) [空き: ${tempFreeGb} GB]"
 #endregion
 
 #region Engine Discovery and Environment Detection
@@ -249,6 +287,7 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
         Write-Host "  - $([System.IO.Path]::GetFileName($f))" -ForegroundColor Gray
     }
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "作業領域 (TEMP)        : $tempDisplayStr" -ForegroundColor Green
     Write-Host "搭載GPU構成            : $gpuDisplayStr" -ForegroundColor Green
     Write-Host "映像スティッチエンジン : 内蔵 (DualfishBlender 公式純正)" -ForegroundColor Green
     Write-Host "空間音声エンジン       : $(if ($hasMovieConverter) { '内蔵 (RICOH THETA Movie Converter 公式純正)' } else { '未検出 (ステレオのみ)' })" -ForegroundColor Green
@@ -347,9 +386,10 @@ function Invoke-ExtractSpatialWav {
         [string]$McDir,
         [string]$StitchedMp4Path,
         [string]$TempWav,
-        [string]$TempMov
+        [string]$TempMov,
+        [string]$WorkDir
     )
-    $tempRunner = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_runner_$([System.Guid]::NewGuid().ToString('N')).ps1")
+    $tempRunner = [System.IO.Path]::Combine($WorkDir, "theta_runner_$([System.Guid]::NewGuid().ToString('N')).ps1")
 
     $dllPathEscaped = [System.IO.Path]::Combine($McDir, "Mp4ConverterLib.dll").Replace('\', '\\')
     $mcDirEscaped = $McDir.Replace('\', '\\')
@@ -394,6 +434,7 @@ function Invoke-ExtractSpatialWav {
 if ($videoFiles.Count -gt 0) {
     Write-Host "`n============================================================" -ForegroundColor Cyan
     Write-Host "動画変換設定:" -ForegroundColor Green
+    Write-Host "  - 一時作業領域 : $tempDisplayStr" -ForegroundColor White
     Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
     Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
     Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant()))" -ForegroundColor White
@@ -428,10 +469,10 @@ if ($videoFiles.Count -gt 0) {
         $finalYaw = $YawOffset
 
         if ($AudioCodec -in 'FLAC', 'PCM' -and $hasMovieConverter) {
-            # Intermediate stitch file in temp directory
-            $tempStitch = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_stitch_${baseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
-            $tempWav = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_audio_${baseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
-            $tempMov = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_mov_${baseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
+            # Intermediate stitch file in RAMDISK/TEMP directory
+            $tempStitch = [System.IO.Path]::Combine($workingTempDir, "theta_stitch_${baseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
+            $tempWav = [System.IO.Path]::Combine($workingTempDir, "theta_audio_${baseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
+            $tempMov = [System.IO.Path]::Combine($workingTempDir, "theta_mov_${baseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
 
             Write-Host "  (1/3) 公式天頂補正スティッチ実行中 (DualfishBlender)..." -ForegroundColor Yellow
             $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$tempStitch`""
@@ -445,7 +486,7 @@ if ($videoFiles.Count -gt 0) {
 
             if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
                 Write-Host "  (2/3) 公式4ch空間音声展開中 (RICOH THETA Movie Converter)..." -ForegroundColor Yellow
-                $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -StitchedMp4Path $tempStitch -TempWav $tempWav -TempMov $tempMov
+                $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -StitchedMp4Path $tempStitch -TempWav $tempWav -TempMov $tempMov -WorkDir $workingTempDir
 
                 Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
 
@@ -568,6 +609,16 @@ if ($imageFiles.Count -gt 0) {
     }
 }
 #endregion
+
+# Clean up temporary directory if empty
+try {
+    if (Test-Path $workingTempDir) {
+        $remains = Get-ChildItem -Path $workingTempDir -ErrorAction SilentlyContinue
+        if ($remains.Count -eq 0) {
+            Remove-Item -Path $workingTempDir -Force -ErrorAction SilentlyContinue
+        }
+    }
+} catch { }
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
 Write-Host "すべての処理が完了しました (動画: $($videoFiles.Count) 件, 静止画: $($imageFiles.Count) 件)" -ForegroundColor Green
