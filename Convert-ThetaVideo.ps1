@@ -8,7 +8,7 @@
     4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
     MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
     任意の方位角度（度）または動画タイムコード指定による正面位置の固定、
-    H.265 (HEVC) / H.264 ハードウェアGPUエンコード (NVIDIA NVENC / Intel QSV / CPU)、
+    dGPU (NVIDIA NVENC / AMD) + Intel iGPU のマルチGPU検出とハードウェアアクセラレーション、
     SSD書き込みを最小限に抑える中間ファイル自動整理、および
     GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
     また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
@@ -18,9 +18,6 @@
 
 .PARAMETER Mode
     スタビライズ・方位固定モード（Spatial: 空間方位固定 / Camera: カメラ正面追従 / Lock: 方位ロック / ImageBlur: 手ブレ補正ON）。
-
-.PARAMETER Codec
-    出力動画コーデック（H264 / H265）。
 
 .PARAMETER Encoder
     エンコーダー指定（Auto / NVENC / QSV / CPU / AMF）。
@@ -50,7 +47,7 @@
     .\Convert-ThetaVideo.ps1 -Path .\R0010414.MP4
 
 .EXAMPLE
-    .\Convert-ThetaVideo.ps1 *.MP4 -Mode Spatial -Codec H265 -YawOffset 90 -NonInteractive
+    .\Convert-ThetaVideo.ps1 *.MP4 -Mode Spatial -Encoder NVENC -YawOffset 90 -NonInteractive
 
 .EXAMPLE
     .\Convert-ThetaVideo.ps1 *.MP4 -CenterTime "00:00:15" -NonInteractive
@@ -66,9 +63,6 @@ param (
 
     [ValidateSet('Spatial', 'Camera', 'Lock', 'ImageBlur')]
     [string]$Mode,
-
-    [ValidateSet('H264', 'H265')]
-    [string]$Codec,
 
     [ValidateSet('Auto', 'NVENC', 'QSV', 'CPU', 'AMF')]
     [string]$Encoder,
@@ -269,7 +263,7 @@ foreach ($f in $inputFiles) {
 #endregion
 
 #region Interactive Menu
-if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWhiteSpace($Mode) -or [string]::IsNullOrWhiteSpace($Codec) -or [string]::IsNullOrWhiteSpace($Encoder) -or [string]::IsNullOrWhiteSpace($Container) -or [string]::IsNullOrWhiteSpace($AudioCodec))) {
+if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWhiteSpace($Mode) -or [string]::IsNullOrWhiteSpace($Encoder) -or [string]::IsNullOrWhiteSpace($Container) -or [string]::IsNullOrWhiteSpace($AudioCodec))) {
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "        RICOH THETA 完全スタンドアロン一括変換ツール        " -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
@@ -316,21 +310,9 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
         }
     }
 
-    # 3. Codec selection
-    if ([string]::IsNullOrWhiteSpace($Codec)) {
-        Write-Host "`n[3] 出力動画コーデックを選択してください:" -ForegroundColor Yellow
-        Write-Host "  1: H.264 (AVC) - 互換性重視 [デフォルト]"
-        Write-Host "  2: H.265 (HEVC) - 高画質 / 小容量 (容量半減・高品質)"
-        $codecChoice = Read-Host "選択 [1-2] (デフォルト: 1)"
-        switch ($codecChoice.Trim()) {
-            '2' { $Codec = 'H265' }
-            default { $Codec = 'H264' }
-        }
-    }
-
-    # 4. Container selection
+    # 3. Container selection
     if ([string]::IsNullOrWhiteSpace($Container)) {
-        Write-Host "`n[4] 出力ファイル形式 (コンテナ) を選択してください:" -ForegroundColor Yellow
+        Write-Host "`n[3] 出力ファイル形式 (コンテナ) を選択してください:" -ForegroundColor Yellow
         Write-Host "  1: MP4 (.mp4) - 汎用・YouTube・Googleフォト・VR標準 [デフォルト]"
         Write-Host "  2: MOV (.mov) - QuickTime / Apple互換"
         $containerChoice = Read-Host "選択 [1-2] (デフォルト: 1)"
@@ -340,10 +322,10 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
         }
     }
 
-    # 5. Audio Codec selection
+    # 4. Audio Codec selection
     if ([string]::IsNullOrWhiteSpace($AudioCodec)) {
         if ($hasMovieConverter) {
-            Write-Host "`n[5] 空間音声 (Ambisonics 4ch) のコーデックを選択してください:" -ForegroundColor Yellow
+            Write-Host "`n[4] 空間音声 (Ambisonics 4ch) のコーデックを選択してください:" -ForegroundColor Yellow
             Write-Host "  1: FLAC (可逆圧縮 / 音質劣化ゼロ・音声容量約75%削減) [推奨/デフォルト]"
             Write-Host "  2: PCM (非圧縮 3072kbps / Movie Converter標準)"
             Write-Host "  3: 通常ステレオ音声 (空間音声なし)"
@@ -358,13 +340,13 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
         }
     }
 
-    # 6. Encoder selection
+    # 5. Encoder selection
     if ([string]::IsNullOrWhiteSpace($Encoder)) {
-        Write-Host "`n[6] エンコーダー (GPUアクセラレーション) を選択してください:" -ForegroundColor Yellow
+        Write-Host "`n[5] エンコーダー (GPUアクセラレーション) を選択してください:" -ForegroundColor Yellow
         Write-Host "  1: NVIDIA NVENC (GeForce RTX/GTX 高速GPUエンコード) [推奨]"
         Write-Host "  2: 自動検出 (DualfishBlender標準 / WMF)"
         Write-Host "  3: Intel QuickSync (QSV ハードウェアエンコード)"
-        Write-Host "  4: CPU ソフトウェアエンコード (libx264/libx265)"
+        Write-Host "  4: CPU ソフトウェアエンコード (libx264)"
         $encChoice = Read-Host "選択 [1-4] (デフォルト: 1)"
         switch ($encChoice.Trim()) {
             '2' { $Encoder = 'Auto' }
@@ -378,7 +360,6 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
 
 # Set defaults if still empty
 if ([string]::IsNullOrWhiteSpace($Mode)) { $Mode = 'Spatial' }
-if ([string]::IsNullOrWhiteSpace($Codec)) { $Codec = 'H264' }
 if ([string]::IsNullOrWhiteSpace($Container)) { $Container = 'MP4' }
 if ([string]::IsNullOrWhiteSpace($AudioCodec)) {
     $AudioCodec = if ($hasMovieConverter) { 'FLAC' } else { 'Stereo' }
@@ -410,40 +391,94 @@ switch ($Encoder) {
 $optionsStr = $optionList -join " "
 #endregion
 
-#region Spatial Audio Converter Helper
+#region Fast Spatial Audio Converter Helper (Native C# + UUID Injection Pipeline)
 function Invoke-ExtractSpatialWav {
     param (
         [string]$McDir,
-        [string]$InputMp4,
+        [string]$RawMp4Path,
+        [string]$StitchedMp4Path,
         [string]$TempWav,
         [string]$TempMov
     )
-    $runnerScript = @"
-Environment.CurrentDirectory = '$($McDir.Replace('\', '\\'))';
-`$asm = [System.Reflection.Assembly]::LoadFrom(Join-Path '$($McDir.Replace('\', '\\'))' 'RICOH THETA Movie Converter.exe')
-`$t = `$asm.GetType('Ricoh_Mp4Converter.Mp4Converter')
-`$instance = [System.Activator]::CreateInstance(`$t)
-`$initM = `$t.GetMethod('InitializeFfmpeg')
-if (`$initM) { `$initM.Invoke(`$instance, `$null) }
-`$convM = `$t.GetMethod('ConvertFile')
-`$res = `$convM.Invoke(`$instance, @('$($InputMp4.Replace('\', '\\'))', '$($TempWav.Replace('\', '\\'))', '$($TempMov.Replace('\', '\\'))'))
-exit [int]`$res
-"@
+    $tempRunner = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_runner_$([System.Guid]::NewGuid().ToString('N')).ps1")
+
+    $dllPathEscaped = [System.IO.Path]::Combine($McDir, "Mp4ConverterLib.dll").Replace('\', '\\')
+    $mcDirEscaped = $McDir.Replace('\', '\\')
+    $rawEscaped = $RawMp4Path.Replace('\', '\\')
+    $stitchedEscaped = $StitchedMp4Path.Replace('\', '\\')
+    $wavEscaped = $TempWav.Replace('\', '\\')
+    $movEscaped = $TempMov.Replace('\', '\\')
+
+    $lines = @(
+        'Add-Type -TypeDefinition @"',
+        'using System;',
+        'using System.IO;',
+        'using System.Runtime.InteropServices;',
+        'public class ThetaFastAudioExtractor {',
+        "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"InitializeFfmpeg`", CallingConvention = CallingConvention.Cdecl)]",
+        '    public static extern void InitializeFfmpeg();',
+        "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"Convert`", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]",
+        '    public static extern int Convert(string mp4Name, string wavName, string movName);',
+        '    public static int Extract(string rawMp4, string stitchedMp4, string tempWav, string tempMov) {',
+        '        string tempInjected = Path.Combine(Path.GetTempPath(), "theta_inj_" + Guid.NewGuid().ToString("N") + ".mp4");',
+        '        try {',
+        '            byte[] uuidTag = new byte[] { 0x75, 0x75, 0x69, 0x64, 0x28, 0xf3, 0x11, 0xe2, 0xb7, 0x91, 0x4f, 0x6f, 0x94, 0xe2, 0x4f, 0x5d, 0xea, 0xcb, 0x3c, 0x01 };',
+        '            FileInfo fi = new FileInfo(rawMp4);',
+        '            long rawLen = fi.Length;',
+        '            int readLen = (int)Math.Min(rawLen, 80 * 1024 * 1024);',
+        '            long seekPos = rawLen - readLen;',
+        '            byte[] buffer = new byte[readLen];',
+        '            using (FileStream fs = File.OpenRead(rawMp4)) {',
+        '                fs.Seek(seekPos, SeekOrigin.Begin);',
+        '                fs.Read(buffer, 0, readLen);',
+        '            }',
+        '            int foundRel = -1;',
+        '            int maxSearch = readLen - uuidTag.Length;',
+        '            for (int i = 0; i <= maxSearch; i++) {',
+        '                if (buffer[i] == 0x75 && buffer[i + 1] == 0x75 && buffer[i + 2] == 0x69 && buffer[i + 3] == 0x64) {',
+        '                    bool match = true;',
+        '                    for (int j = 4; j < uuidTag.Length; j++) {',
+        '                        if (buffer[i + j] != uuidTag[j]) { match = false; break; }',
+        '                    }',
+        '                    if (match) { foundRel = i; break; }',
+        '                }',
+        '            }',
+        '            if (foundRel == -1) return -1;',
+        '            int atomStartRel = foundRel - 4;',
+        '            int atomLen = (buffer[atomStartRel] << 24) | (buffer[atomStartRel + 1] << 16) | (buffer[atomStartRel + 2] << 8) | buffer[atomStartRel + 3];',
+        '            if (atomLen <= 0 || atomStartRel + atomLen > readLen) return -1;',
+        '            File.Copy(stitchedMp4, tempInjected, true);',
+        '            using (FileStream fs = File.Open(tempInjected, FileMode.Append, FileAccess.Write)) {',
+        '                fs.Write(buffer, atomStartRel, atomLen);',
+        '            }',
+        '            InitializeFfmpeg();',
+        '            return Convert(tempInjected, tempWav, tempMov);',
+        '        } finally {',
+        '            if (File.Exists(tempInjected)) {',
+        '                try { File.Delete(tempInjected); } catch { }',
+        '            }',
+        '        }',
+        '    }',
+        '}',
+        '"@',
+        "[System.IO.Directory]::SetCurrentDirectory('$mcDirEscaped')",
+        "`$ret = [ThetaFastAudioExtractor]::Extract('$rawEscaped', '$stitchedEscaped', '$wavEscaped', '$movEscaped')",
+        'exit `$ret'
+    )
+
+    $utf8WithBom = [System.Text.UTF8Encoding]::new($true)
+    [System.IO.File]::WriteAllLines($tempRunner, $lines, $utf8WithBom)
+
     $x86PowerShell = Join-Path $env:SystemRoot "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
     if (-not (Test-Path $x86PowerShell)) {
         $x86PowerShell = "powershell.exe"
     }
 
-    $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-    $pinfo.FileName = $x86PowerShell
-    $pinfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$runnerScript`""
-    $pinfo.WorkingDirectory = $McDir
-    $pinfo.UseShellExecute = $false
-    $pinfo.RedirectStandardOutput = $true
-    $pinfo.RedirectStandardError = $true
-    $proc = [System.Diagnostics.Process]::Start($pinfo)
-    $proc.WaitForExit()
-    return $proc.ExitCode
+    & "$x86PowerShell" -NoProfile -ExecutionPolicy Bypass -File "$tempRunner" *>$null
+    $exitCode = $LASTEXITCODE
+
+    Remove-Item $tempRunner -Force -ErrorAction SilentlyContinue
+    return $exitCode
 }
 #endregion
 
@@ -453,7 +488,6 @@ if ($videoFiles.Count -gt 0) {
     Write-Host "動画変換設定:" -ForegroundColor Green
     Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
     Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
-    Write-Host "  - コーデック   : $Codec $(if ($Codec -eq 'H265') { '(H.265 / HEVC 高圧縮モード)' } else { '(H.264 / AVC)' })" -ForegroundColor White
     Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant()))" -ForegroundColor White
     Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -ne 'Stereo') { '(4ch 空間音声 Ambisonics)' })" -ForegroundColor White
     Write-Host "  - エンコーダー : $Encoder" -ForegroundColor White
@@ -504,9 +538,9 @@ if ($videoFiles.Count -gt 0) {
 
             if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
                 Write-Host "  (2/3) 4ch 空間音声(Ambisonics AmbiX)展開中..." -ForegroundColor Yellow
-                $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -InputMp4 $tempStitch -TempWav $tempWav -TempMov $tempMov
+                $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -RawMp4Path $srcItem.FullName -StitchedMp4Path $tempStitch -TempWav $tempWav -TempMov $tempMov
 
-                Write-Host "  (3/3) 映像($Codec) + 4ch 空間音声($AudioCodec)結合・エンコード中..." -ForegroundColor Yellow
+                Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
 
                 $audioParams = ""
                 $fmtParam = ""
@@ -520,43 +554,18 @@ if ($videoFiles.Count -gt 0) {
                     }
                 }
 
-                # Video encoding params based on Codec and Encoder
-                $videoEncodeParams = ""
                 $vFilterParam = if ($finalYaw -ne 0.0) { "-vf `"v360=e:e:yaw=$finalYaw`"" } else { "" }
+                $vCodecParam = if ($vFilterParam) { "-c:v h264_nvenc -b:v 56000000" } else { "-c:v copy" }
 
-                if ($Codec -eq 'H265') {
-                    # Explicit HEVC (H.265) encoding
-                    switch ($Encoder) {
-                        'NVENC' { $videoEncodeParams = "-c:v hevc_nvenc -b:v 28000000 -tag:v hvc1" }
-                        'QSV'   { $videoEncodeParams = "-c:v hevc_qsv -b:v 28000000 -tag:v hvc1" }
-                        'CPU'   { $videoEncodeParams = "-c:v libx265 -crf 18 -preset medium -tag:v hvc1" }
-                        default {
-                            if ($hasNvidia) { $videoEncodeParams = "-c:v hevc_nvenc -b:v 28000000 -tag:v hvc1" }
-                            else { $videoEncodeParams = "-c:v libx265 -crf 18 -preset medium -tag:v hvc1" }
-                        }
-                    }
-                } else {
-                    # H.264
-                    if ($vFilterParam) {
-                        switch ($Encoder) {
-                            'NVENC' { $videoEncodeParams = "-c:v h264_nvenc -b:v 56000000" }
-                            'QSV'   { $videoEncodeParams = "-c:v h264_qsv -b:v 56000000" }
-                            default { $videoEncodeParams = "-c:v libx264 -crf 17 -preset fast" }
-                        }
-                    } else {
-                        $videoEncodeParams = "-c:v copy"
-                    }
-                }
-
-                if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($Codec -ne 'H265') -and ($finalYaw -eq 0.0)) {
+                if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($finalYaw -eq 0.0)) {
                     Move-Item $tempMov $dstFile -Force
                     $muxSuccess = $true
                 } elseif (Test-Path $tempWav) {
-                    $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $videoEncodeParams $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
+                    $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                     cmd.exe /c $ffmpegCmd
                     $muxSuccess = (Test-Path $dstFile)
                 } elseif (Test-Path $tempMov) {
-                    $ffmpegCmd = "ffmpeg -i `"$tempMov`" $videoEncodeParams $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
+                    $ffmpegCmd = "ffmpeg -i `"$tempMov`" $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                     cmd.exe /c $ffmpegCmd
                     $muxSuccess = (Test-Path $dstFile)
                 } else {
@@ -574,9 +583,9 @@ if ($videoFiles.Count -gt 0) {
                     $dstItem.LastWriteTime = $targetDt
                     $dstItem.LastAccessTime = $targetDt
                     $stopwatch.Stop()
-                    Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - $Codec + 4ch $AudioCodec 空間音声・タイムスタンプ自動同期完了" -ForegroundColor Green
+                    Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 4ch $AudioCodec 空間音声・タイムスタンプ自動同期完了" -ForegroundColor Green
                 } else {
-                    Write-Error "  [NG] 空間音声の結合・エンコードに失敗しました。"
+                    Write-Error "  [NG] 空間音声の結合に失敗しました。"
                 }
             } else {
                 Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue

@@ -18,8 +18,8 @@ RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画お
    * 動画全体の「正面」を任意の角度（例: `90°`, `-45°`, `180°`）に回転オフセット固定可能。
    * また、動画内の特定タイムコード（例: `00:00:15` や `15.5` 秒）を指定することで、**その瞬間に見ている方向を動画全体の「正面（0度）」として固定** できます。
 
-3. **マルチGPU（dGPU / iGPU）の自動検出とハードウェアエンコード**
-   * ノートPC等の Optimus 環境でも、NVIDIA / AMD の dGPU を自動検出し、環境変数の自動最適化と NVENC / QSV ハードウェアエンコードに対応。
+3. **マルチGPU（dGPU / iGPU）の自動検出と NVIDIA NVENC 高速エンコード**
+   * ノートPC等の Optimus 環境でも、NVIDIA / AMD の dGPU を自動検出し、環境変数の自動最適化と NVENC ハードウェアアクセラレーションに対応。
 
 4. **Google フォト JSON からの撮影日時・更新日時 自動復元**
    * Google フォトや Google Takeout からダウンロードした動画・写真は、OS のファイル作成日・更新日がダウンロード日時にリセットされてしまいます。
@@ -74,10 +74,9 @@ RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画お
 2. 動画の場合、対話メニューが表示されます（**すべて Enter キーを押すだけで推奨デフォルト値で即時開始** されます）：
    * **[1] スタビライズ方式:** `1: 空間方位固定` (推奨) / `2: カメラ正面追従` / `3: 方位完全ロック` / `4: 手ブレ補正ON`
    * **[2] 正面方位調整 (任意):** 角度（`90` / `-45`）または タイムコード（`00:00:15` / `15.5`）を入力（省略時: そのまま）
-   * **[3] 出力コーデック:** `1: H.264 (AVC)` (推奨) / `2: H.265 (HEVC)`
-   * **[4] コンテナ形式:** `1: MP4 (.mp4)` (推奨) / `2: MOV (.mov)`
-   * **[5] 空間音声形式:** `1: FLAC (可逆圧縮 / 容量75%削減)` (推奨) / `2: PCM (非圧縮)` / `3: 通常ステレオ`
-   * **[6] エンコーダー:** `1: GPU自動検出` / `2: NVIDIA NVENC` / `3: Intel QSV` / `4: CPU`
+   * **[3] 出力形式 (コンテナ):** `1: MP4 (.mp4)` (推奨) / `2: MOV (.mov)`
+   * **[4] 空間音声形式:** `1: FLAC (可逆圧縮 / 容量75%削減)` (推奨) / `2: PCM (非圧縮)` / `3: 通常ステレオ`
+   * **[5] エンコーダー:** `1: NVIDIA NVENC` (推奨) / `2: 自動検出` / `3: Intel QSV` / `4: CPU`
 3. 処理完了後、`*_corrected.mp4`（動画）または `*_corrected.jpg`（静止画）が元ファイルと同じフォルダに出力されます。
 
 ### 方法 2: PowerShell コマンドライン
@@ -85,8 +84,8 @@ RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画お
 # ヘルプの表示
 .\Convert-ThetaVideo.ps1 -h
 
-# 非対話で 4ch FLAC 空間音声 + MP4 + H.265 + タイムコード正面固定一括変換
-.\Convert-ThetaVideo.ps1 *.MP4 -Container MP4 -AudioCodec FLAC -Mode Spatial -Codec H265 -CenterTime "00:00:15" -NonInteractive
+# 非対話で 4ch FLAC 空間音声 + MP4 + NVENC 一括変換
+.\Convert-ThetaVideo.ps1 *.MP4 -Container MP4 -AudioCodec FLAC -Mode Spatial -Encoder NVENC -NonInteractive
 
 # 正面角度を 90度回転して変換
 .\Convert-ThetaVideo.ps1 .\R0010414.MP4 -YawOffset 90 -NonInteractive
