@@ -494,7 +494,7 @@ if ($videoFiles.Count -gt 0) {
                 $fmtParam = ""
                 switch ($AudioCodec) {
                     'FLAC' {
-                        $audioParams = "-c:a flac -channel_layout 4.0"
+                        $audioParams = "-c:a flac -channel_layout quad"
                         $fmtParam = "-f mp4"
                     }
                     'PCM' {
