@@ -8,7 +8,7 @@
     4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
     MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
     任意の方位角度（度）または動画タイムコード指定による正面位置の固定、
-    dGPU (NVIDIA/AMD) + iGPU のマルチGPU検出と GPU エンコーダー選択 (NVENC/QSV/CPU)、
+    H.265 (HEVC) / H.264 ハードウェアGPUエンコード (NVIDIA NVENC / Intel QSV / CPU)、
     SSD書き込みを最小限に抑える中間ファイル自動整理、および
     GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
     また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
@@ -143,11 +143,13 @@ $hasMovieConverter = (Test-Path (Join-Path $movieConverterDir "RICOH THETA Movie
 
 # 4. Detect all GPUs on the system (dGPU + iGPU)
 $gpuList = [System.Collections.Generic.List[string]]::new()
+$hasNvidia = $false
 try {
     $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
     foreach ($c in $controllers) {
         if ($c.Name -and $c.Name -notmatch "Basic Display|Miracast") {
             $gpuList.Add($c.Name)
+            if ($c.Name -match "NVIDIA|GeForce|RTX|GTX") { $hasNvidia = $true }
         }
     }
 } catch { }
@@ -318,7 +320,7 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     if ([string]::IsNullOrWhiteSpace($Codec)) {
         Write-Host "`n[3] 出力動画コーデックを選択してください:" -ForegroundColor Yellow
         Write-Host "  1: H.264 (AVC) - 互換性重視 [デフォルト]"
-        Write-Host "  2: H.265 (HEVC) - 高画質 / 小容量 [-enableH265]"
+        Write-Host "  2: H.265 (HEVC) - 高画質 / 小容量 (容量半減・高品質)"
         $codecChoice = Read-Host "選択 [1-2] (デフォルト: 1)"
         switch ($codecChoice.Trim()) {
             '2' { $Codec = 'H265' }
@@ -359,16 +361,16 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     # 6. Encoder selection
     if ([string]::IsNullOrWhiteSpace($Encoder)) {
         Write-Host "`n[6] エンコーダー (GPUアクセラレーション) を選択してください:" -ForegroundColor Yellow
-        Write-Host "  1: 自動検出 (DualfishBlender標準 / 推奨・安定) [デフォルト]"
-        Write-Host "  2: NVIDIA NVENC (GeForce RTX/GTX 高速GPUエンコード) [-encodeFFmpeg:nvenc]"
-        Write-Host "  3: Intel QuickSync (QSV ハードウェアエンコード) [-encodeFFmpeg:qsv]"
-        Write-Host "  4: CPU ソフトウェアエンコード [-encodeFFmpeg:libx]"
+        Write-Host "  1: NVIDIA NVENC (GeForce RTX/GTX 高速GPUエンコード) [推奨]"
+        Write-Host "  2: 自動検出 (DualfishBlender標準 / WMF)"
+        Write-Host "  3: Intel QuickSync (QSV ハードウェアエンコード)"
+        Write-Host "  4: CPU ソフトウェアエンコード (libx264/libx265)"
         $encChoice = Read-Host "選択 [1-4] (デフォルト: 1)"
         switch ($encChoice.Trim()) {
-            '2' { $Encoder = 'NVENC' }
+            '2' { $Encoder = 'Auto' }
             '3' { $Encoder = 'QSV' }
             '4' { $Encoder = 'CPU' }
-            default { $Encoder = 'Auto' }
+            default { $Encoder = if ($hasNvidia) { 'NVENC' } else { 'Auto' } }
         }
     }
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
@@ -381,10 +383,12 @@ if ([string]::IsNullOrWhiteSpace($Container)) { $Container = 'MP4' }
 if ([string]::IsNullOrWhiteSpace($AudioCodec)) {
     $AudioCodec = if ($hasMovieConverter) { 'FLAC' } else { 'Stereo' }
 }
-if ([string]::IsNullOrWhiteSpace($Encoder)) { $Encoder = 'Auto' }
+if ([string]::IsNullOrWhiteSpace($Encoder)) {
+    $Encoder = if ($hasNvidia) { 'NVENC' } else { 'Auto' }
+}
 #endregion
 
-#region Build Command Options
+#region Build DualfishBlender Command Options
 $optionList = [System.Collections.Generic.List[string]]::new()
 
 # Mode option
@@ -395,12 +399,7 @@ switch ($Mode) {
     'ImageBlur' { $optionList.Add("-stabilize:image") }
 }
 
-# Codec option
-if ($Codec -eq 'H265') {
-    $optionList.Add("-enableH265")
-}
-
-# Encoder option
+# Encoder option for DualfishBlender intermediate stitch
 switch ($Encoder) {
     'NVENC' { $optionList.Add("-encodeFFmpeg:nvenc") }
     'QSV'   { $optionList.Add("-encodeFFmpeg:qsv") }
@@ -454,7 +453,7 @@ if ($videoFiles.Count -gt 0) {
     Write-Host "動画変換設定:" -ForegroundColor Green
     Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
     Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
-    Write-Host "  - コーデック   : $Codec" -ForegroundColor White
+    Write-Host "  - コーデック   : $Codec $(if ($Codec -eq 'H265') { '(H.265 / HEVC 高圧縮モード)' } else { '(H.264 / AVC)' })" -ForegroundColor White
     Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant()))" -ForegroundColor White
     Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -ne 'Stereo') { '(4ch 空間音声 Ambisonics)' })" -ForegroundColor White
     Write-Host "  - エンコーダー : $Encoder" -ForegroundColor White
@@ -507,7 +506,7 @@ if ($videoFiles.Count -gt 0) {
                 Write-Host "  (2/3) 4ch 空間音声(Ambisonics AmbiX)展開中..." -ForegroundColor Yellow
                 $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -InputMp4 $tempStitch -TempWav $tempWav -TempMov $tempMov
 
-                Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
+                Write-Host "  (3/3) 映像($Codec) + 4ch 空間音声($AudioCodec)結合・エンコード中..." -ForegroundColor Yellow
 
                 $audioParams = ""
                 $fmtParam = ""
@@ -521,23 +520,43 @@ if ($videoFiles.Count -gt 0) {
                     }
                 }
 
-                # Yaw rotation filter if offset requested
-                $vFilterParam = ""
-                if ($finalYaw -ne 0.0) {
-                    $vFilterParam = "-vf `"v360=e:e:yaw=$finalYaw`""
+                # Video encoding params based on Codec and Encoder
+                $videoEncodeParams = ""
+                $vFilterParam = if ($finalYaw -ne 0.0) { "-vf `"v360=e:e:yaw=$finalYaw`"" } else { "" }
+
+                if ($Codec -eq 'H265') {
+                    # Explicit HEVC (H.265) encoding
+                    switch ($Encoder) {
+                        'NVENC' { $videoEncodeParams = "-c:v hevc_nvenc -b:v 28000000 -tag:v hvc1" }
+                        'QSV'   { $videoEncodeParams = "-c:v hevc_qsv -b:v 28000000 -tag:v hvc1" }
+                        'CPU'   { $videoEncodeParams = "-c:v libx265 -crf 18 -preset medium -tag:v hvc1" }
+                        default {
+                            if ($hasNvidia) { $videoEncodeParams = "-c:v hevc_nvenc -b:v 28000000 -tag:v hvc1" }
+                            else { $videoEncodeParams = "-c:v libx265 -crf 18 -preset medium -tag:v hvc1" }
+                        }
+                    }
+                } else {
+                    # H.264
+                    if ($vFilterParam) {
+                        switch ($Encoder) {
+                            'NVENC' { $videoEncodeParams = "-c:v h264_nvenc -b:v 56000000" }
+                            'QSV'   { $videoEncodeParams = "-c:v h264_qsv -b:v 56000000" }
+                            default { $videoEncodeParams = "-c:v libx264 -crf 17 -preset fast" }
+                        }
+                    } else {
+                        $videoEncodeParams = "-c:v copy"
+                    }
                 }
 
-                if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($finalYaw -eq 0.0)) {
+                if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($Codec -ne 'H265') -and ($finalYaw -eq 0.0)) {
                     Move-Item $tempMov $dstFile -Force
                     $muxSuccess = $true
                 } elseif (Test-Path $tempWav) {
-                    $vCodecParam = if ($vFilterParam) { "-c:v libx264 -crf 17" } else { "-c:v copy" }
-                    $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
+                    $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $videoEncodeParams $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                     cmd.exe /c $ffmpegCmd
                     $muxSuccess = (Test-Path $dstFile)
                 } elseif (Test-Path $tempMov) {
-                    $vCodecParam = if ($vFilterParam) { "-c:v libx264 -crf 17" } else { "-c:v copy" }
-                    $ffmpegCmd = "ffmpeg -i `"$tempMov`" $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
+                    $ffmpegCmd = "ffmpeg -i `"$tempMov`" $videoEncodeParams $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                     cmd.exe /c $ffmpegCmd
                     $muxSuccess = (Test-Path $dstFile)
                 } else {
@@ -555,9 +574,9 @@ if ($videoFiles.Count -gt 0) {
                     $dstItem.LastWriteTime = $targetDt
                     $dstItem.LastAccessTime = $targetDt
                     $stopwatch.Stop()
-                    Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 4ch $AudioCodec 空間音声・タイムスタンプ自動同期完了" -ForegroundColor Green
+                    Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - $Codec + 4ch $AudioCodec 空間音声・タイムスタンプ自動同期完了" -ForegroundColor Green
                 } else {
-                    Write-Error "  [NG] 空間音声の結合に失敗しました。"
+                    Write-Error "  [NG] 空間音声の結合・エンコードに失敗しました。"
                 }
             } else {
                 Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
