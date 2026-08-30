@@ -50,52 +50,38 @@
 .EXAMPLE
     .\Convert-ThetaVideo.ps1 -h
 #>
-[CmdletBinding(DefaultParameterSetName = 'Convert')]
+[CmdletBinding()]
 param (
     #region Parameters
-    [Parameter(ParameterSetName = 'Help')]
-    [Alias('h', '-help')]
-    [switch]$Help,
-
-    [Parameter(Mandatory = $false, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Convert')]
+    [Parameter(Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ValueFromRemainingArguments = $true)]
     [string[]]$Path,
 
-    [Parameter(ParameterSetName = 'Convert')]
     [ValidateSet('Spatial', 'Camera', 'Lock')]
     [string]$Mode,
 
-    [Parameter(ParameterSetName = 'Convert')]
     [ValidateSet('H264', 'H265')]
     [string]$Codec,
 
-    [Parameter(ParameterSetName = 'Convert')]
     [ValidateSet('Auto', 'NVENC', 'QSV', 'CPU', 'AMF')]
     [string]$Encoder,
 
-    [Parameter(ParameterSetName = 'Convert')]
     [ValidateSet('MP4', 'MOV')]
     [string]$Container,
 
-    [Parameter(ParameterSetName = 'Convert')]
     [ValidateSet('FLAC', 'PCM', 'Stereo')]
     [string]$AudioCodec,
 
-    [Parameter(ParameterSetName = 'Convert')]
     [string]$OutputDir,
 
-    [Parameter(ParameterSetName = 'Convert')]
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+
+    [Alias('h', '-help')]
+    [switch]$Help
     #endregion
 )
 
 #region Help Handling
-if ($Help -or ($PSCmdlet.ParameterSetName -eq 'Help') -or (($PSCmdlet.ParameterSetName -eq 'Convert') -and (-not $Path) -and (-not $NonInteractive))) {
-    if (-not $Path -and -not $Help) {
-        Get-Help -Name $PSCommandPath -Full
-        exit 0
-    }
-}
-if ($Help) {
+if ($Help -or (-not $Path -and -not $NonInteractive)) {
     Get-Help -Name $PSCommandPath -Full
     exit 0
 }
