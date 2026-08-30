@@ -1,14 +1,13 @@
 ﻿<#
 .SYNOPSIS
-    RICOH THETAの未加工動画・静止画を対話型設定・正常な天頂補正・4ch空間音声(FLAC)展開・任意方位固定で一括変換します。
+    RICOH THETAの未加工動画・静止画を対話型設定・正常な天頂補正・4ch空間音声(FLAC/PCM)展開・任意方位固定で一括変換します。
 
 .DESCRIPTION
-    RICOH THETA公式エンジン（DualfishBlender.exe）および RICOH THETA Movie Converter を内蔵し、
-    手ブレ補正による映像の傾き不具合を解消した高品質な360度Equirectangular動画を生成します。
+    RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
+    純正パイプラインを100%そのまま使用し、独自のバイナリ操作を行うことなく高品質な360度Equirectangular動画を生成します。
     4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
     MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
     任意の方位角度（度）または動画タイムコード指定による正面位置の固定、
-    dGPU (NVIDIA NVENC / AMD) + Intel iGPU のマルチGPU検出とハードウェアアクセラレーション、
     SSD書き込みを最小限に抑える中間ファイル自動整理、および
     GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
     また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
@@ -18,9 +17,6 @@
 
 .PARAMETER Mode
     スタビライズ・方位固定モード（Spatial: 空間方位固定 / Camera: カメラ正面追従 / Lock: 方位ロック / ImageBlur: 手ブレ補正ON）。
-
-.PARAMETER Encoder
-    エンコーダー指定（Auto / NVENC / QSV / CPU / AMF）。
 
 .PARAMETER Container
     出力コンテナ形式（MP4 / MOV）。
@@ -47,7 +43,7 @@
     .\Convert-ThetaVideo.ps1 -Path .\R0010414.MP4
 
 .EXAMPLE
-    .\Convert-ThetaVideo.ps1 *.MP4 -Mode Spatial -Encoder NVENC -YawOffset 90 -NonInteractive
+    .\Convert-ThetaVideo.ps1 *.MP4 -Mode Spatial -YawOffset 90 -NonInteractive
 
 .EXAMPLE
     .\Convert-ThetaVideo.ps1 *.MP4 -CenterTime "00:00:15" -NonInteractive
@@ -63,9 +59,6 @@ param (
 
     [ValidateSet('Spatial', 'Camera', 'Lock', 'ImageBlur')]
     [string]$Mode,
-
-    [ValidateSet('Auto', 'NVENC', 'QSV', 'CPU', 'AMF')]
-    [string]$Encoder,
 
     [ValidateSet('MP4', 'MOV')]
     [string]$Container,
@@ -117,38 +110,22 @@ if (Test-Path $localBlender) {
     exit 1
 }
 
-# 2. Upgrade bundled ffmpeg with system ffmpeg if needed (enables NVENC / QSV support)
-$bundledFfmpeg = Join-Path $resourcesPath "ffmpeg64\ffmpeg.exe"
-if (Test-Path $bundledFfmpeg) {
-    try {
-        $hasNvenc = (& "$bundledFfmpeg" -encoders 2>$null | Select-String "h264_nvenc")
-        if (-not $hasNvenc) {
-            $sysFfmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
-            if ($sysFfmpegCmd) {
-                Copy-Item -Path $sysFfmpegCmd.Source -Destination $bundledFfmpeg -Force
-            }
-        }
-    } catch { }
-}
-
-# 3. RICOH THETA Movie Converter path
+# 2. RICOH THETA Movie Converter path (Official spatial audio engine)
 $movieConverterDir = Join-Path $scriptDir "tools\ricoh_movie_converter"
 $hasMovieConverter = (Test-Path (Join-Path $movieConverterDir "RICOH THETA Movie Converter.exe")) -and (Test-Path (Join-Path $movieConverterDir "Mp4ConverterLib.dll"))
 
-# 4. Detect all GPUs on the system (dGPU + iGPU)
+# 3. Detect all GPUs on the system (dGPU + iGPU)
 $gpuList = [System.Collections.Generic.List[string]]::new()
-$hasNvidia = $false
 try {
     $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
     foreach ($c in $controllers) {
         if ($c.Name -and $c.Name -notmatch "Basic Display|Miracast") {
             $gpuList.Add($c.Name)
-            if ($c.Name -match "NVIDIA|GeForce|RTX|GTX") { $hasNvidia = $true }
         }
     }
 } catch { }
 
-# 5. Check DualfishBlender showCapability
+# 4. Check DualfishBlender showCapability
 $detectedGpu = "Auto"
 try {
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -263,7 +240,7 @@ foreach ($f in $inputFiles) {
 #endregion
 
 #region Interactive Menu
-if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWhiteSpace($Mode) -or [string]::IsNullOrWhiteSpace($Encoder) -or [string]::IsNullOrWhiteSpace($Container) -or [string]::IsNullOrWhiteSpace($AudioCodec))) {
+if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWhiteSpace($Mode) -or [string]::IsNullOrWhiteSpace($Container) -or [string]::IsNullOrWhiteSpace($AudioCodec))) {
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "        RICOH THETA 完全スタンドアロン一括変換ツール        " -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
@@ -273,8 +250,8 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     }
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "搭載GPU構成            : $gpuDisplayStr" -ForegroundColor Green
-    Write-Host "映像スティッチエンジン : 内蔵 (DualfishBlender)" -ForegroundColor Green
-    Write-Host "空間音声エンジン       : $(if ($hasMovieConverter) { '内蔵 (Ambisonics AmbiX + SA3D)' } else { '未検出 (ステレオのみ)' })" -ForegroundColor Green
+    Write-Host "映像スティッチエンジン : 内蔵 (DualfishBlender 公式純正)" -ForegroundColor Green
+    Write-Host "空間音声エンジン       : $(if ($hasMovieConverter) { '内蔵 (RICOH THETA Movie Converter 公式純正)' } else { '未検出 (ステレオのみ)' })" -ForegroundColor Green
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
 
     # 1. Mode selection
@@ -327,7 +304,7 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
         if ($hasMovieConverter) {
             Write-Host "`n[4] 空間音声 (Ambisonics 4ch) のコーデックを選択してください:" -ForegroundColor Yellow
             Write-Host "  1: FLAC (可逆圧縮 / 音質劣化ゼロ・音声容量約75%削減) [推奨/デフォルト]"
-            Write-Host "  2: PCM (非圧縮 3072kbps / Movie Converter標準)"
+            Write-Host "  2: PCM (非圧縮 3072kbps / Movie Converter公式標準)"
             Write-Host "  3: 通常ステレオ音声 (空間音声なし)"
             $audioChoice = Read-Host "選択 [1-3] (デフォルト: 1)"
             switch ($audioChoice.Trim()) {
@@ -339,22 +316,6 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
             $AudioCodec = 'Stereo'
         }
     }
-
-    # 5. Encoder selection
-    if ([string]::IsNullOrWhiteSpace($Encoder)) {
-        Write-Host "`n[5] エンコーダー (GPUアクセラレーション) を選択してください:" -ForegroundColor Yellow
-        Write-Host "  1: NVIDIA NVENC (GeForce RTX/GTX 高速GPUエンコード) [推奨]"
-        Write-Host "  2: 自動検出 (DualfishBlender標準 / WMF)"
-        Write-Host "  3: Intel QuickSync (QSV ハードウェアエンコード)"
-        Write-Host "  4: CPU ソフトウェアエンコード (libx264)"
-        $encChoice = Read-Host "選択 [1-4] (デフォルト: 1)"
-        switch ($encChoice.Trim()) {
-            '2' { $Encoder = 'Auto' }
-            '3' { $Encoder = 'QSV' }
-            '4' { $Encoder = 'CPU' }
-            default { $Encoder = if ($hasNvidia) { 'NVENC' } else { 'Auto' } }
-        }
-    }
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
 }
 
@@ -364,15 +325,12 @@ if ([string]::IsNullOrWhiteSpace($Container)) { $Container = 'MP4' }
 if ([string]::IsNullOrWhiteSpace($AudioCodec)) {
     $AudioCodec = if ($hasMovieConverter) { 'FLAC' } else { 'Stereo' }
 }
-if ([string]::IsNullOrWhiteSpace($Encoder)) {
-    $Encoder = if ($hasNvidia) { 'NVENC' } else { 'Auto' }
-}
 #endregion
 
 #region Build DualfishBlender Command Options
 $optionList = [System.Collections.Generic.List[string]]::new()
 
-# Mode option
+# Mode option (Official DualfishBlender stabilize flags)
 switch ($Mode) {
     'Spatial'   { $optionList.Add("-stabilize:-image") }
     'Camera'    { $optionList.Add("-stabilize:off") }
@@ -380,22 +338,13 @@ switch ($Mode) {
     'ImageBlur' { $optionList.Add("-stabilize:image") }
 }
 
-# Encoder option for DualfishBlender intermediate stitch
-switch ($Encoder) {
-    'NVENC' { $optionList.Add("-encodeFFmpeg:nvenc") }
-    'QSV'   { $optionList.Add("-encodeFFmpeg:qsv") }
-    'CPU'   { $optionList.Add("-encodeFFmpeg:libx") }
-    'AMF'   { $optionList.Add("-encodeFFmpeg:amf") }
-}
-
 $optionsStr = $optionList -join " "
 #endregion
 
-#region Fast Spatial Audio Converter Helper (Native C# + UUID Injection Pipeline)
+#region Official Spatial Audio Converter Helper (RICOH THETA Movie Converter Pipeline)
 function Invoke-ExtractSpatialWav {
     param (
         [string]$McDir,
-        [string]$RawMp4Path,
         [string]$StitchedMp4Path,
         [string]$TempWav,
         [string]$TempMov
@@ -404,7 +353,6 @@ function Invoke-ExtractSpatialWav {
 
     $dllPathEscaped = [System.IO.Path]::Combine($McDir, "Mp4ConverterLib.dll").Replace('\', '\\')
     $mcDirEscaped = $McDir.Replace('\', '\\')
-    $rawEscaped = $RawMp4Path.Replace('\', '\\')
     $stitchedEscaped = $StitchedMp4Path.Replace('\', '\\')
     $wavEscaped = $TempWav.Replace('\', '\\')
     $movEscaped = $TempMov.Replace('\', '\\')
@@ -412,57 +360,17 @@ function Invoke-ExtractSpatialWav {
     $lines = @(
         'Add-Type -TypeDefinition @"',
         'using System;',
-        'using System.IO;',
         'using System.Runtime.InteropServices;',
-        'public class ThetaFastAudioExtractor {',
+        'public class NativeMp4Converter {',
         "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"InitializeFfmpeg`", CallingConvention = CallingConvention.Cdecl)]",
         '    public static extern void InitializeFfmpeg();',
         "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"Convert`", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]",
         '    public static extern int Convert(string mp4Name, string wavName, string movName);',
-        '    public static int Extract(string rawMp4, string stitchedMp4, string tempWav, string tempMov) {',
-        '        string tempInjected = Path.Combine(Path.GetTempPath(), "theta_inj_" + Guid.NewGuid().ToString("N") + ".mp4");',
-        '        try {',
-        '            byte[] uuidTag = new byte[] { 0x75, 0x75, 0x69, 0x64, 0x28, 0xf3, 0x11, 0xe2, 0xb7, 0x91, 0x4f, 0x6f, 0x94, 0xe2, 0x4f, 0x5d, 0xea, 0xcb, 0x3c, 0x01 };',
-        '            FileInfo fi = new FileInfo(rawMp4);',
-        '            long rawLen = fi.Length;',
-        '            int readLen = (int)Math.Min(rawLen, 80 * 1024 * 1024);',
-        '            long seekPos = rawLen - readLen;',
-        '            byte[] buffer = new byte[readLen];',
-        '            using (FileStream fs = File.OpenRead(rawMp4)) {',
-        '                fs.Seek(seekPos, SeekOrigin.Begin);',
-        '                fs.Read(buffer, 0, readLen);',
-        '            }',
-        '            int foundRel = -1;',
-        '            int maxSearch = readLen - uuidTag.Length;',
-        '            for (int i = 0; i <= maxSearch; i++) {',
-        '                if (buffer[i] == 0x75 && buffer[i + 1] == 0x75 && buffer[i + 2] == 0x69 && buffer[i + 3] == 0x64) {',
-        '                    bool match = true;',
-        '                    for (int j = 4; j < uuidTag.Length; j++) {',
-        '                        if (buffer[i + j] != uuidTag[j]) { match = false; break; }',
-        '                    }',
-        '                    if (match) { foundRel = i; break; }',
-        '                }',
-        '            }',
-        '            if (foundRel == -1) return -1;',
-        '            int atomStartRel = foundRel - 4;',
-        '            int atomLen = (buffer[atomStartRel] << 24) | (buffer[atomStartRel + 1] << 16) | (buffer[atomStartRel + 2] << 8) | buffer[atomStartRel + 3];',
-        '            if (atomLen <= 0 || atomStartRel + atomLen > readLen) return -1;',
-        '            File.Copy(stitchedMp4, tempInjected, true);',
-        '            using (FileStream fs = File.Open(tempInjected, FileMode.Append, FileAccess.Write)) {',
-        '                fs.Write(buffer, atomStartRel, atomLen);',
-        '            }',
-        '            InitializeFfmpeg();',
-        '            return Convert(tempInjected, tempWav, tempMov);',
-        '        } finally {',
-        '            if (File.Exists(tempInjected)) {',
-        '                try { File.Delete(tempInjected); } catch { }',
-        '            }',
-        '        }',
-        '    }',
         '}',
         '"@',
         "[System.IO.Directory]::SetCurrentDirectory('$mcDirEscaped')",
-        "`$ret = [ThetaFastAudioExtractor]::Extract('$rawEscaped', '$stitchedEscaped', '$wavEscaped', '$movEscaped')",
+        '[NativeMp4Converter]::InitializeFfmpeg()',
+        "`$ret = [NativeMp4Converter]::Convert('$stitchedEscaped', '$wavEscaped', '$movEscaped')",
         'exit `$ret'
     )
 
@@ -490,7 +398,6 @@ if ($videoFiles.Count -gt 0) {
     Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
     Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant()))" -ForegroundColor White
     Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -ne 'Stereo') { '(4ch 空間音声 Ambisonics)' })" -ForegroundColor White
-    Write-Host "  - エンコーダー : $Encoder" -ForegroundColor White
     Write-Host "============================================================" -ForegroundColor Cyan
 
     $vIdx = 0
@@ -526,7 +433,7 @@ if ($videoFiles.Count -gt 0) {
             $tempWav = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_audio_${baseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
             $tempMov = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "theta_mov_${baseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
 
-            Write-Host "  (1/3) 映像天頂補正スティッチ実行中..." -ForegroundColor Yellow
+            Write-Host "  (1/3) 公式天頂補正スティッチ実行中 (DualfishBlender)..." -ForegroundColor Yellow
             $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$tempStitch`""
             $pinfo = New-Object System.Diagnostics.ProcessStartInfo
             $pinfo.FileName = $blenderPath
@@ -537,8 +444,8 @@ if ($videoFiles.Count -gt 0) {
             $procBlender.WaitForExit()
 
             if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
-                Write-Host "  (2/3) 4ch 空間音声(Ambisonics AmbiX)展開中..." -ForegroundColor Yellow
-                $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -RawMp4Path $srcItem.FullName -StitchedMp4Path $tempStitch -TempWav $tempWav -TempMov $tempMov
+                Write-Host "  (2/3) 公式4ch空間音声展開中 (RICOH THETA Movie Converter)..." -ForegroundColor Yellow
+                $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -StitchedMp4Path $tempStitch -TempWav $tempWav -TempMov $tempMov
 
                 Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
 
