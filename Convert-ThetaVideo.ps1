@@ -7,8 +7,9 @@
     手ブレ補正による映像の傾き不具合を解消した高品質な360度Equirectangular動画を生成します。
     4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
     MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロックの切り替え、H.265コーデック、GPUエンコーダー選択、
-    SSD書き込みを最小限に抑える中間ファイル自動整理、および
-    ファイル作成日・更新日・EXIF撮影日メタデータの完全引き継ぎ（Googleフォト対応）に対応しています。
+    SSD書き込みを最小限に抑える中間ファイル自動整理、
+    GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元、
+    および公式アプリで既に処理されて傾いてしまった Equirectangular 動画の水平回転再補正に対応しています。
     また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
 
 .PARAMETER Path
@@ -28,6 +29,15 @@
 
 .PARAMETER AudioCodec
     音声コーデック（FLAC: 可逆圧縮軽量化 / PCM: 非圧縮 / Stereo: 通常ステレオ）。
+
+.PARAMETER FixPitch
+    公式アプリ等で処理済みの傾いた動画に対するピッチ（上下傾き）手動補正角度（度）。
+
+.PARAMETER FixRoll
+    公式アプリ等で処理済みの傾いた動画に対するロール（左右傾き）手動補正角度（度）。
+
+.PARAMETER FixYaw
+    方位（ヨー）手動補正角度（度）。
 
 .PARAMETER OutputDir
     出力先ディレクトリ（省略時は元ファイルと同じフォルダ）。
@@ -79,6 +89,15 @@ param (
     [Parameter(ParameterSetName = 'Convert')]
     [ValidateSet('FLAC', 'PCM', 'Stereo')]
     [string]$AudioCodec,
+
+    [Parameter(ParameterSetName = 'Convert')]
+    [double]$FixPitch = 0.0,
+
+    [Parameter(ParameterSetName = 'Convert')]
+    [double]$FixRoll = 0.0,
+
+    [Parameter(ParameterSetName = 'Convert')]
+    [double]$FixYaw = 0.0,
 
     [Parameter(ParameterSetName = 'Convert')]
     [string]$OutputDir,
@@ -141,6 +160,60 @@ try {
     }
 } catch {
     $detectedGpu = "Auto"
+}
+#endregion
+
+#region Timestamp Extraction Helper (Google Photos JSON & Metadata)
+function Get-MediaTrueTimestamp {
+    param (
+        [string]$FilePath
+    )
+    $fileItem = Get-Item $FilePath
+    $dir = $fileItem.DirectoryName
+    $name = $fileItem.Name
+    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name)
+
+    # 1. Search Google Photos JSON files: <name>.json, <name>.MP4.json, <nameWithoutExt>.json
+    $jsonCandidates = @(
+        (Join-Path $dir "$name.json"),
+        (Join-Path $dir "$nameWithoutExt.json"),
+        (Join-Path $dir "$nameWithoutExt.MP4.json"),
+        (Join-Path $dir "$nameWithoutExt.JPG.json"),
+        (Join-Path $dir "$nameWithoutExt.MOV.json")
+    )
+    foreach ($jc in $jsonCandidates) {
+        if (Test-Path $jc) {
+            try {
+                $jsonContent = Get-Content -Path $jc -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($jsonContent.photoTakenTime -and $jsonContent.photoTakenTime.timestamp) {
+                    $tsLong = [int64]$jsonContent.photoTakenTime.timestamp
+                    if ($tsLong -gt 0) {
+                        $dt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
+                        return @{ DateTime = $dt; Source = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))" }
+                    }
+                }
+                if ($jsonContent.creationTime -and $jsonContent.creationTime.timestamp) {
+                    $tsLong = [int64]$jsonContent.creationTime.timestamp
+                    if ($tsLong -gt 0) {
+                        $dt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
+                        return @{ DateTime = $dt; Source = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))" }
+                    }
+                }
+            } catch { }
+        }
+    }
+
+    # 2. Search internal EXIF / QuickTime CreateDate via exiftool
+    try {
+        $exifDate = (exiftool -d "%Y:%m:%d %H:%M:%S" -s3 -DateTimeOriginal -CreateDate -CreationDate -TrackCreateDate "$FilePath" 2>$null | Where-Object { $_ -match "^\d{4}:\d{2}:\d{2}" } | Select-Object -First 1)
+        if ($exifDate -and ($exifDate -match "^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})")) {
+            $parsedDt = [datetime]::ParseExact($exifDate.Trim(), "yyyy:MM:dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+            return @{ DateTime = $parsedDt; Source = "InternalMetadata (EXIF/QuickTime)" }
+        }
+    } catch { }
+
+    # 3. Fallback to file system LastWriteTime
+    return @{ DateTime = $fileItem.LastWriteTime; Source = "FileSystem" }
 }
 #endregion
 
@@ -363,14 +436,56 @@ if ($videoFiles.Count -gt 0) {
         $ext = "." + $Container.ToLowerInvariant()
         $dstFile = [System.IO.Path]::Combine($dir, "${baseName}_corrected$ext")
 
+        # Extract true creation timestamp (Google Photos JSON or internal metadata)
+        $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
+        $targetDt = $trueTimeInfo.DateTime
+        $timeSrcName = $trueTimeInfo.Source
+
         Write-Host "`n[動画 $vIdx/$($videoFiles.Count)] 処理開始: $($srcItem.Name)" -ForegroundColor Cyan
-        Write-Host "  最終出力先: $dstFile" -ForegroundColor Gray
+        Write-Host "  撮影日時検出: $($targetDt.ToString('yyyy-MM-dd HH:mm:ss')) (ソース: $timeSrcName)" -ForegroundColor Green
+        Write-Host "  最終出力先  : $dstFile" -ForegroundColor Gray
 
         if (Test-Path $dstFile) {
             Remove-Item $dstFile -Force
         }
 
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # Check if input video is already stitched Equirectangular (Aspect ratio approx 2:1 and Spherical metadata)
+        $isEquirectangular = $false
+        try {
+            $probeW = & ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$($srcItem.FullName)" 2>$null
+            $probeH = & ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$($srcItem.FullName)" 2>$null
+            if ($probeW -and $probeH) {
+                $w = [int]$probeW; $h = [int]$probeH
+                if ($w -ge 1920 -and [Math]::Abs(($w / $h) - 2.0) -lt 0.05) {
+                    $isEquirectangular = $true
+                }
+            }
+        } catch { }
+
+        if ($isEquirectangular -and ($FixPitch -ne 0.0 -or $FixRoll -ne 0.0 -or $FixYaw -ne 0.0)) {
+            # Reprocess already stitched, tilted video using v360 filter
+            Write-Host "  [検出] 処理済みEquirectangular動画を検出。姿勢回転補正 (Pitch: $FixPitch°, Roll: $FixRoll°, Yaw: $FixYaw°) を適用中..." -ForegroundColor Yellow
+            $v360Filter = "v360=e:e:pitch=$FixPitch:roll=$FixRoll:yaw=$FixYaw"
+            $encParam = if ($Codec -eq 'H265') { "-c:v libx265 -crf 18" } else { "-c:v libx264 -crf 17 -preset slow" }
+            $audParam = if ($AudioCodec -eq 'FLAC') { "-c:a flac -channel_layout 4.0 -f mp4" } else { "-c:a copy" }
+            $ffCmd = "ffmpeg -i `"$($srcItem.FullName)`" -vf `"$v360Filter`" $encParam $audParam `"$dstFile`" -y -loglevel error"
+            cmd.exe /c $ffCmd
+
+            if (Test-Path $dstFile) {
+                exiftool -TagsFromFile "$($srcItem.FullName)" -time:all -overwrite_original "$dstFile" *>$null
+                $dstItem = Get-Item $dstFile
+                $dstItem.CreationTime = $targetDt
+                $dstItem.LastWriteTime = $targetDt
+                $dstItem.LastAccessTime = $targetDt
+                $stopwatch.Stop()
+                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 姿勢再補正・タイムスタンプ同期完了" -ForegroundColor Green
+            } else {
+                Write-Error "  [NG] 姿勢再補正に失敗しました。"
+            }
+            continue
+        }
 
         if ($AudioCodec -in 'FLAC', 'PCM' -and $hasMovieConverter) {
             # Intermediate stitch file in temp directory
@@ -394,8 +509,6 @@ if ($videoFiles.Count -gt 0) {
 
                 Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
 
-                # Audio encoding parameters
-                # Use -f mp4 to allow 4ch FLAC in both .mp4 and .mov container targets
                 $audioParams = ""
                 $fmtParam = ""
                 switch ($AudioCodec) {
@@ -408,12 +521,10 @@ if ($videoFiles.Count -gt 0) {
                     }
                 }
 
-                # If PCM in MOV was produced directly by tempMov, move it
                 if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov)) {
                     Move-Item $tempMov $dstFile -Force
                     $muxSuccess = $true
                 } elseif (Test-Path $tempWav) {
-                    # Mux tempStitch video + tempWav 4ch audio with desired codec
                     $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 -c:v copy $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                     cmd.exe /c $ffmpegCmd
                     $muxSuccess = (Test-Path $dstFile)
@@ -425,20 +536,18 @@ if ($videoFiles.Count -gt 0) {
                     $muxSuccess = $false
                 }
 
-                # Clean up intermediate temporary files immediately to minimize SSD usage
                 Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
                 Remove-Item $tempWav -Force -ErrorAction SilentlyContinue
                 Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
 
                 if ($muxSuccess -and (Test-Path $dstFile)) {
-                    # Copy all time metadata
                     exiftool -TagsFromFile "$($srcItem.FullName)" -time:all -overwrite_original "$dstFile" *>$null
                     $dstItem = Get-Item $dstFile
-                    $dstItem.CreationTime = $srcItem.CreationTime
-                    $dstItem.LastWriteTime = $srcItem.LastWriteTime
-                    $dstItem.LastAccessTime = $srcItem.LastAccessTime
+                    $dstItem.CreationTime = $targetDt
+                    $dstItem.LastWriteTime = $targetDt
+                    $dstItem.LastAccessTime = $targetDt
                     $stopwatch.Stop()
-                    Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 4ch $AudioCodec 空間音声・タイムスタンプ同期完了" -ForegroundColor Green
+                    Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 4ch $AudioCodec 空間音声・タイムスタンプ自動同期完了" -ForegroundColor Green
                 } else {
                     Write-Error "  [NG] 空間音声の結合に失敗しました。"
                 }
@@ -459,10 +568,10 @@ if ($videoFiles.Count -gt 0) {
 
             if ($procBlender.ExitCode -eq 0 -and (Test-Path $dstFile)) {
                 $dstItem = Get-Item $dstFile
-                $dstItem.CreationTime = $srcItem.CreationTime
-                $dstItem.LastWriteTime = $srcItem.LastWriteTime
-                $dstItem.LastAccessTime = $srcItem.LastAccessTime
-                Write-Host "  [OK] 変換完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムスタンプ同期完了" -ForegroundColor Green
+                $dstItem.CreationTime = $targetDt
+                $dstItem.LastWriteTime = $targetDt
+                $dstItem.LastAccessTime = $targetDt
+                Write-Host "  [OK] 変換完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムスタンプ自動同期完了" -ForegroundColor Green
             } else {
                 Write-Error "  [NG] DualfishBlender がエラー終了しました (ExitCode: $($procBlender.ExitCode))"
             }
@@ -485,7 +594,12 @@ if ($imageFiles.Count -gt 0) {
         $baseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name)
         $dstFile = [System.IO.Path]::Combine($dir, "${baseName}_corrected.jpg")
 
+        $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
+        $targetDt = $trueTimeInfo.DateTime
+        $timeSrcName = $trueTimeInfo.Source
+
         Write-Host "`n[静止画 $imgIdx/$($imageFiles.Count)] 水平補正中: $($srcItem.Name)" -ForegroundColor Cyan
+        Write-Host "  撮影日時検出: $($targetDt.ToString('yyyy-MM-dd HH:mm:ss')) (ソース: $timeSrcName)" -ForegroundColor Green
         Write-Host "  出力先: $dstFile" -ForegroundColor Gray
 
         if (Test-Path $dstFile) {
@@ -500,9 +614,9 @@ if ($imageFiles.Count -gt 0) {
             # Copy all EXIF/XMP tags
             exiftool -TagsFromFile "$($srcItem.FullName)" -all:all -overwrite_original "$dstFile" *>$null
             $dstItem = Get-Item $dstFile
-            $dstItem.CreationTime = $srcItem.CreationTime
-            $dstItem.LastWriteTime = $srcItem.LastWriteTime
-            $dstItem.LastAccessTime = $srcItem.LastAccessTime
+            $dstItem.CreationTime = $targetDt
+            $dstItem.LastWriteTime = $targetDt
+            $dstItem.LastAccessTime = $targetDt
             Write-Host "  [OK] 水平化完了 - 360度パノラマタグ・タイムスタンプ同期完了" -ForegroundColor Green
         } else {
             Write-Error "  [NG] 静止画の水平補正に失敗しました。"
