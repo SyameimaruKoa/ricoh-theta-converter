@@ -1,19 +1,18 @@
 ﻿<#
 .SYNOPSIS
-    RICOH THETAの動画・静止画を対話型設定・正常な天頂補正・4ch空間音声(FLAC)展開で一括変換します。
+    RICOH THETAの未加工動画・静止画を対話型設定・正常な天頂補正・4ch空間音声(FLAC)展開で一括変換します。
 
 .DESCRIPTION
     RICOH THETA公式エンジン（DualfishBlender.exe）および RICOH THETA Movie Converter を内蔵し、
     手ブレ補正による映像の傾き不具合を解消した高品質な360度Equirectangular動画を生成します。
     4ch 空間音声（First-Order Ambisonics AmbiX + SA3D）の FLAC(可逆圧縮)/PCM(非圧縮)展開、
     MP4 / MOV コンテナ選択、空間方位固定/カメラ正面追従/方位ロックの切り替え、H.265コーデック、GPUエンコーダー選択、
-    SSD書き込みを最小限に抑える中間ファイル自動整理、
-    GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元、
-    および公式アプリで既に処理されて傾いてしまった Equirectangular 動画の水平回転再補正に対応しています。
+    SSD書き込みを最小限に抑える中間ファイル自動整理、および
+    GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
     また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
 
 .PARAMETER Path
-    変換対象のRICOH THETA動画・静止画ファイルパス（複数指定、ワイルドカード、パイプライン対応）。
+    変換対象のRICOH THETA未加工動画・静止画ファイルパス（複数指定、ワイルドカード、パイプライン対応）。
 
 .PARAMETER Mode
     スタビライズ・方位固定モード（Spatial: 空間方位固定 / Camera: カメラ正面追従 / Lock: 方位ロック）。
@@ -29,15 +28,6 @@
 
 .PARAMETER AudioCodec
     音声コーデック（FLAC: 可逆圧縮軽量化 / PCM: 非圧縮 / Stereo: 通常ステレオ）。
-
-.PARAMETER FixPitch
-    公式アプリ等で処理済みの傾いた動画に対するピッチ（上下傾き）手動補正角度（度）。
-
-.PARAMETER FixRoll
-    公式アプリ等で処理済みの傾いた動画に対するロール（左右傾き）手動補正角度（度）。
-
-.PARAMETER FixYaw
-    方位（ヨー）手動補正角度（度）。
 
 .PARAMETER OutputDir
     出力先ディレクトリ（省略時は元ファイルと同じフォルダ）。
@@ -89,15 +79,6 @@ param (
     [Parameter(ParameterSetName = 'Convert')]
     [ValidateSet('FLAC', 'PCM', 'Stereo')]
     [string]$AudioCodec,
-
-    [Parameter(ParameterSetName = 'Convert')]
-    [double]$FixPitch = 0.0,
-
-    [Parameter(ParameterSetName = 'Convert')]
-    [double]$FixRoll = 0.0,
-
-    [Parameter(ParameterSetName = 'Convert')]
-    [double]$FixYaw = 0.0,
 
     [Parameter(ParameterSetName = 'Convert')]
     [string]$OutputDir,
@@ -450,42 +431,6 @@ if ($videoFiles.Count -gt 0) {
         }
 
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
-        # Check if input video is already stitched Equirectangular (Aspect ratio approx 2:1 and Spherical metadata)
-        $isEquirectangular = $false
-        try {
-            $probeW = & ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$($srcItem.FullName)" 2>$null
-            $probeH = & ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$($srcItem.FullName)" 2>$null
-            if ($probeW -and $probeH) {
-                $w = [int]$probeW; $h = [int]$probeH
-                if ($w -ge 1920 -and [Math]::Abs(($w / $h) - 2.0) -lt 0.05) {
-                    $isEquirectangular = $true
-                }
-            }
-        } catch { }
-
-        if ($isEquirectangular -and ($FixPitch -ne 0.0 -or $FixRoll -ne 0.0 -or $FixYaw -ne 0.0)) {
-            # Reprocess already stitched, tilted video using v360 filter
-            Write-Host "  [検出] 処理済みEquirectangular動画を検出。姿勢回転補正 (Pitch: $FixPitch°, Roll: $FixRoll°, Yaw: $FixYaw°) を適用中..." -ForegroundColor Yellow
-            $v360Filter = "v360=e:e:pitch=$FixPitch:roll=$FixRoll:yaw=$FixYaw"
-            $encParam = if ($Codec -eq 'H265') { "-c:v libx265 -crf 18" } else { "-c:v libx264 -crf 17 -preset slow" }
-            $audParam = if ($AudioCodec -eq 'FLAC') { "-c:a flac -channel_layout 4.0 -f mp4" } else { "-c:a copy" }
-            $ffCmd = "ffmpeg -i `"$($srcItem.FullName)`" -vf `"$v360Filter`" $encParam $audParam `"$dstFile`" -y -loglevel error"
-            cmd.exe /c $ffCmd
-
-            if (Test-Path $dstFile) {
-                exiftool -TagsFromFile "$($srcItem.FullName)" -time:all -overwrite_original "$dstFile" *>$null
-                $dstItem = Get-Item $dstFile
-                $dstItem.CreationTime = $targetDt
-                $dstItem.LastWriteTime = $targetDt
-                $dstItem.LastAccessTime = $targetDt
-                $stopwatch.Stop()
-                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 姿勢再補正・タイムスタンプ同期完了" -ForegroundColor Green
-            } else {
-                Write-Error "  [NG] 姿勢再補正に失敗しました。"
-            }
-            continue
-        }
 
         if ($AudioCodec -in 'FLAC', 'PCM' -and $hasMovieConverter) {
             # Intermediate stitch file in temp directory
