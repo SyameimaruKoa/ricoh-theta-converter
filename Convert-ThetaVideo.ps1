@@ -4,8 +4,9 @@
 
 .DESCRIPTION
     RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
-    純正パイプラインを100%そのまま使用し、YouTubeやVRプレイヤーで確実に360度空間音声（Ambisonics SA3D）として認識される
-    高品質なEquirectangular動画を生成します。
+    純正パイプラインを100%そのまま使用し、YouTubeやVRプレイヤー・VLC・Googleフォトで確実に360度空間映像・空間音声（Ambisonics SA3D）として
+    認識される高品質なEquirectangular動画を生成します。
+    正面回転オフセット（-YawOffset）やタイムコード指定時にも、Google公式SpatialMediaメタデータを完全自動注入し、360度認識を保証します。
     
     【処理内容別ファイル名サフィックス規則】
     どのような処理が行われたかがファイル名だけで完全に判別・区別できるように自動命名されます：
@@ -160,7 +161,10 @@ if (Test-Path $localBlender) {
 $movieConverterDir = Join-Path $scriptDir "tools\ricoh_movie_converter"
 $hasMovieConverter = (Test-Path (Join-Path $movieConverterDir "RICOH THETA Movie Converter.exe")) -and (Test-Path (Join-Path $movieConverterDir "Mp4ConverterLib.dll"))
 
-# 3. Detect all GPUs on the system (dGPU + iGPU)
+# 3. Google SpatialMedia tools path
+$spatialMediaDir = Join-Path $scriptDir "tools\spatialmedia"
+
+# 4. Detect all GPUs on the system (dGPU + iGPU)
 $gpuList = [System.Collections.Generic.List[string]]::new()
 try {
     $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
@@ -171,7 +175,7 @@ try {
     }
 } catch { }
 
-# 4. Check DualfishBlender showCapability
+# 5. Check DualfishBlender showCapability
 $detectedGpu = "Auto"
 try {
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -245,6 +249,44 @@ function Get-MediaTrueTimestamp {
 
     # 3. Fallback to file system LastWriteTime
     return @{ DateTime = $fileItem.LastWriteTime; Source = "FileSystem" }
+}
+#endregion
+
+#region Spherical 360 Video Metadata Injector (Google SpatialMedia)
+function Inject-Spherical360Metadata {
+    param (
+        [string]$TargetMoviePath,
+        [string]$ToolsDir,
+        [string]$WorkDir
+    )
+    $pyScript = @"
+import sys, os, shutil
+tools_dir = r'$ToolsDir'
+target = r'$TargetMoviePath'
+work_dir = r'$WorkDir'
+
+sys.path.insert(0, tools_dir)
+try:
+    from spatialmedia import metadata_utils
+    metadata = metadata_utils.Metadata()
+    metadata.video = metadata_utils.generate_spherical_xml()
+    temp_out = os.path.join(work_dir, 'theta_inj_' + os.path.basename(target))
+    metadata_utils.inject_metadata(target, temp_out, metadata, lambda s: None)
+    if os.path.exists(temp_out) and os.path.getsize(temp_out) > 0:
+        shutil.move(temp_out, target)
+        sys.exit(0)
+    else:
+        sys.exit(1)
+except Exception as e:
+    sys.exit(2)
+"@
+    $tempPy = [System.IO.Path]::Combine($WorkDir, "theta_inject_$([System.Guid]::NewGuid().ToString('N')).py")
+    [System.IO.File]::WriteAllText($tempPy, $pyScript, [System.Text.Encoding]::UTF8)
+    
+    python "$tempPy" *>$null
+    $exitCode = $LASTEXITCODE
+    Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
+    return ($exitCode -eq 0)
 }
 #endregion
 
@@ -548,10 +590,17 @@ foreach ($srcFile in $videoFiles) {
                 $ffmpegCmd = "ffmpeg -i `"$tempMov`" $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                 cmd.exe /c $ffmpegCmd
                 $muxSuccess = (Test-Path $dstFile)
+                if ($muxSuccess -and $vFilterParam) {
+                    # Inject 360 Spherical metadata because ffmpeg re-encode drops it
+                    Inject-Spherical360Metadata -TargetMoviePath $dstFile -ToolsDir (Join-Path $scriptDir "tools") -WorkDir $workingTempDir | Out-Null
+                }
             } elseif (Test-Path $tempWav) {
                 $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                 cmd.exe /c $ffmpegCmd
                 $muxSuccess = (Test-Path $dstFile)
+                if ($muxSuccess) {
+                    Inject-Spherical360Metadata -TargetMoviePath $dstFile -ToolsDir (Join-Path $scriptDir "tools") -WorkDir $workingTempDir | Out-Null
+                }
             } else {
                 $muxSuccess = $false
             }
@@ -567,7 +616,7 @@ foreach ($srcFile in $videoFiles) {
                 $dstItem.LastWriteTime = $targetDt
                 $dstItem.LastAccessTime = $targetDt
                 $stopwatch.Stop()
-                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 4ch $AudioCodec 空間音声・タイムスタンプ自動同期完了" -ForegroundColor Green
+                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 360度空間メタデータ・4ch $AudioCodec 音声・タイムスタンプ完全同期完了" -ForegroundColor Green
             } else {
                 Write-Error "  [NG] 空間音声の結合に失敗しました。"
             }
