@@ -1,6 +1,6 @@
-# RICOH THETA 完全スタンドアロン動画・静止画 一括変換・復元ツール
+# RICOH THETA 完全スタンドアロン動画 一括変換・復元ツール
 
-RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画および静止画を、**水平維持・正常な天頂補正・YouTube/VR公式空間音声 (SA3D内蔵) 対応・処理内容別完全識別サフィックス・Googleフォト撮影日時自動復元・RAMDISK 作業領域対応** で高速かつ安全に一括変換・復元するツールです。
+RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画を、**水平維持・正常な天頂補正・YouTube/VR公式空間音声 (SA3D内蔵) 対応・処理内容別完全識別サフィックス・Googleフォト撮影日時自動復元・RAMDISK 作業領域対応** で高速かつ安全に一括変換・復元するツールです。
 
 ---
 
@@ -17,7 +17,6 @@ RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画お
    | **方位完全ロック** | `R0010390_er_lock.mov` / `.mp4` | ジャイロ天頂補正＋撮影開始時の方位完全固定 |
    | **正面方位回転オフセット** | `R0010390_er_spatial_yaw90.mov` | ヨー角（角度）を指定して正面を回転固定 |
    | **タイムコード正面指定** | `R0010390_er_spatial_tc000015.mov` | 指定秒数の時点を動画全体の正面に固定 |
-   | **静止画水平化補正** | `R0010390_st.JPG` / `_st_yaw90.JPG` | カメラ固有の姿勢オフセットを自動解消 |
 
 2. **RICOH 公式エンジンの完全純正パイプライン（手ブレ補正の映像傾きバグ解消）**
    - RICOH THETA 公式エンジン（`DualfishBlender.exe`）を内蔵。
@@ -34,7 +33,7 @@ RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画お
    - 大容量の 360度動画変換に伴う SSD への書き込み負荷を完全にゼロにし、SSD の寿命を強力に保護します。
 
 6. **Google フォト JSON からの撮影日時・更新日時 自動復元**
-   - Google フォトや Google Takeout からダウンロードした動画・写真は、OS のファイル作成日・更新日がリセットされてしまいますが、同一フォルダ内の `<動画名>.json` や EXIF / QuickTime メタデータから **本来の撮影日時にファイルタイムスタンプを完全自動復元** します。
+   - Google フォトや Google Takeout からダウンロードした動画は、OS のファイル作成日・更新日がリセットされてしまいますが、同一フォルダ内の `<動画名>.json` や EXIF / QuickTime メタデータから **本来の撮影日時にファイルタイムスタンプを完全自動復元** します。
 
 ---
 
@@ -42,7 +41,7 @@ RICOH THETA（THETA V / Z1 等）で撮影した未加工 Dual-Fisheye 動画お
 
 ```text
 ricoh-theta-converter/
-├── Convert-ThetaVideo.bat         # 動画・静止画 一括変換 D&D起動バッチ
+├── Convert-ThetaVideo.bat         # 動画一括変換 D&D起動バッチ
 ├── Convert-ThetaVideo.ps1         # 変換メインスクリプト（PowerShell）
 ├── Restore-ThetaSpatialMov.bat    # YouTube空間音声MOV 復元・再変換バッチ (D&D対応)
 ├── Restore-ThetaSpatialMov.ps1    # 空間音声MOV 復元メインスクリプト
@@ -60,7 +59,7 @@ ricoh-theta-converter/
 
 ### 方法 1: 通常変換（ドラッグ＆ドロップ）
 
-1. 変換したい動画（`.MP4` / `.MOV`）や静止画（`.JPG`）を、**`Convert-ThetaVideo.bat`** にドラッグ＆ドロップします。
+1. 変換したい動画（`.MP4` / `.MOV`）を、**`Convert-ThetaVideo.bat`** にドラッグ＆ドロップします。
 2. 対話メニューが表示されます（**すべて Enter キーを押すだけで推奨の空間方位固定 MOV + PCM 4ch 空間音声で即時開始** されます）：
    * **[1] スタビライズ方式:** `1: 空間方位固定 [_er_spatial]` (推奨/デフォルト) / `2: カメラ正面追従 [_er_cam]` / `3: 方位完全ロック [_er_lock]` / `4: 手ブレ補正ON [_er]`
    * **[2] 正面方位調整 (任意):** 角度（`90` / `-45`）または タイムコード（`00:00:15` / `15.5`）を入力（省略時: そのまま）

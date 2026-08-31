@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    RICOH THETAの未加工動画・静止画を対話型設定・正常な天頂補正・4ch空間音声(SA3D内蔵MOV/PCM)展開・任意方位固定で一括変換します。
+    RICOH THETAの未加工動画を対話型設定・正常な天頂補正・4ch空間音声(SA3D内蔵MOV/PCM)展開・任意方位固定で一括変換します。
 
 .DESCRIPTION
     RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
@@ -15,14 +15,13 @@
       - 方位完全ロック         : *_er_lock.mov / *_er_lock.mp4
       - 正面方位回転あり       : *_er_spatial_yaw90.mov / *_er_cam_yaw-45.mov
       - タイムコード正面指定   : *_er_spatial_tc000015.mov
-      - 静止画水平補正         : *_st.jpg / *_st_yaw90.jpg
 
     RAMDISK（R:\ 等）の自動検出と中間作業領域の完全RAM化に対応し、SSD書き込み寿命を強力に保護します。
     公式標準の MOV (PCM 4ch + SA3D内蔵) を最優先推奨・デフォルトとし、
     GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
 
 .PARAMETER Path
-    変換対象のRICOH THETA未加工動画・静止画ファイルパス（複数指定、ワイルドカード、パイプライン対応）。
+    変換対象のRICOH THETA未加工動画ファイルパス（複数指定、ワイルドカード、パイプライン対応）。
 
 .PARAMETER Mode
     スタビライズ・方位固定モード（Spatial: 空間方位固定 / Camera: カメラ正面追従 / Lock: 方位ロック / ImageBlur: 手ブレ補正ON）。
@@ -203,7 +202,7 @@ function Get-MediaTrueTimestamp {
     $fileItem = Get-Item $FilePath
     $dir = $fileItem.DirectoryName
     $name = $fileItem.Name
-    $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+    $cleanRegex = '(_er|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
     $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace $cleanRegex, ''
 
     # 1. Search Google Photos JSON files: <name>.json, <name>.MP4.json, <nameWithoutExt>.json
@@ -211,7 +210,6 @@ function Get-MediaTrueTimestamp {
         (Join-Path $dir "$name.json"),
         (Join-Path $dir "$nameWithoutExt.json"),
         (Join-Path $dir "$nameWithoutExt.MP4.json"),
-        (Join-Path $dir "$nameWithoutExt.JPG.json"),
         (Join-Path $dir "$nameWithoutExt.MOV.json")
     )
     foreach ($jc in $jsonCandidates) {
@@ -251,7 +249,7 @@ function Get-MediaTrueTimestamp {
 #endregion
 
 #region Collect Input Files
-$inputFiles = [System.Collections.Generic.List[string]]::new()
+$videoFiles = [System.Collections.Generic.List[string]]::new()
 if ($Path) {
     foreach ($p in $Path) {
         if ([string]::IsNullOrWhiteSpace($p)) { continue }
@@ -259,41 +257,35 @@ if ($Path) {
         if ($resolved.Count -gt 0) {
             foreach ($r in $resolved) {
                 if (Test-Path -Path $r.Path -PathType Leaf) {
-                    $inputFiles.Add($r.Path)
+                    $ext = [System.IO.Path]::GetExtension($r.Path).ToLowerInvariant()
+                    if ($ext -in '.mp4', '.mov') {
+                        $videoFiles.Add($r.Path)
+                    }
                 }
             }
         } elseif (Test-Path -Path $p -PathType Leaf) {
-            $inputFiles.Add((Get-Item $p).FullName)
+            $ext = [System.IO.Path]::GetExtension($p).ToLowerInvariant()
+            if ($ext -in '.mp4', '.mov') {
+                $videoFiles.Add((Get-Item $p).FullName)
+            }
         }
     }
 }
 
-if ($inputFiles.Count -eq 0) {
-    Write-Host "処理対象の動画または静止画ファイルが指定されていません。" -ForegroundColor Yellow
+if ($videoFiles.Count -eq 0) {
+    Write-Host "処理対象の動画ファイル (.MP4 / .MOV) が指定されていません。" -ForegroundColor Yellow
     Get-Help -Name $PSCommandPath -Full
     exit 0
-}
-
-$videoFiles = [System.Collections.Generic.List[string]]::new()
-$imageFiles = [System.Collections.Generic.List[string]]::new()
-
-foreach ($f in $inputFiles) {
-    $ext = [System.IO.Path]::GetExtension($f).ToLowerInvariant()
-    if ($ext -in '.mp4', '.mov') {
-        $videoFiles.Add($f)
-    } elseif ($ext -in '.jpg', '.jpeg') {
-        $imageFiles.Add($f)
-    }
 }
 #endregion
 
 #region Interactive Menu
 if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWhiteSpace($Mode) -or [string]::IsNullOrWhiteSpace($Container) -or [string]::IsNullOrWhiteSpace($AudioCodec))) {
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "        RICOH THETA 完全スタンドアロン一括変換ツール        " -ForegroundColor Cyan
+    Write-Host "        RICOH THETA 完全スタンドアロン動画変換ツール        " -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "動画ファイル: $($videoFiles.Count) 件, 静止画ファイル: $($imageFiles.Count) 件" -ForegroundColor White
-    foreach ($f in $inputFiles) {
+    Write-Host "動画ファイル: $($videoFiles.Count) 件" -ForegroundColor White
+    foreach ($f in $videoFiles) {
         Write-Host "  - $([System.IO.Path]::GetFileName($f))" -ForegroundColor Gray
     }
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
@@ -397,7 +389,7 @@ function Get-OutputSuffix {
         [double]$Yaw,
         [string]$TimeCode
     )
-    # Base mode suffix
+    # Base mode tag
     $modeTag = switch ($ProcessMode) {
         'Spatial'   { "_er_spatial" }
         'Camera'    { "_er_cam" }
@@ -470,191 +462,138 @@ function Invoke-ExtractSpatialWav {
 #endregion
 
 #region Batch Execution - Videos
-if ($videoFiles.Count -gt 0) {
-    Write-Host "`n============================================================" -ForegroundColor Cyan
-    Write-Host "動画変換設定:" -ForegroundColor Green
-    Write-Host "  - 一時作業領域 : $tempDisplayStr" -ForegroundColor White
-    Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
-    Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
-    Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant())) $(if ($Container -eq 'MOV') { '[YouTube空間音声公式推奨 / SA3D内蔵]' })" -ForegroundColor White
-    Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -eq 'PCM') { '(4ch 空間音声 Ambisonics / YouTube公式完全対応)' } elseif ($AudioCodec -eq 'FLAC') { '【スーパー非推奨 / YouTube空間音声非対応】' } else { '(通常ステレオ)' })" -ForegroundColor White
-    Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "`n============================================================" -ForegroundColor Cyan
+Write-Host "動画変換設定:" -ForegroundColor Green
+Write-Host "  - 一時作業領域 : $tempDisplayStr" -ForegroundColor White
+Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
+Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
+Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant())) $(if ($Container -eq 'MOV') { '[YouTube空間音声公式推奨 / SA3D内蔵]' })" -ForegroundColor White
+Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -eq 'PCM') { '(4ch 空間音声 Ambisonics / YouTube公式完全対応)' } elseif ($AudioCodec -eq 'FLAC') { '【スーパー非推奨 / YouTube空間音声非対応】' } else { '(通常ステレオ)' })" -ForegroundColor White
+Write-Host "============================================================" -ForegroundColor Cyan
 
-    $vIdx = 0
-    foreach ($srcFile in $videoFiles) {
-        $vIdx++
-        $srcItem = Get-Item $srcFile
-        $dir = if ($OutputDir) { $OutputDir } else { $srcItem.DirectoryName }
-        $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
-        $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
-        $ext = "." + $Container.ToLowerInvariant()
+$vIdx = 0
+foreach ($srcFile in $videoFiles) {
+    $vIdx++
+    $srcItem = Get-Item $srcFile
+    $dir = if ($OutputDir) { $OutputDir } else { $srcItem.DirectoryName }
+    $cleanRegex = '(_er|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+    $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
+    $ext = "." + $Container.ToLowerInvariant()
 
-        # Build feature-distinct suffix
-        $suffix = Get-OutputSuffix -ProcessMode $Mode -Yaw $YawOffset -TimeCode $CenterTime
-        $dstFileName = "$rawBaseName$suffix$ext"
-        $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
+    # Build feature-distinct suffix
+    $suffix = Get-OutputSuffix -ProcessMode $Mode -Yaw $YawOffset -TimeCode $CenterTime
+    $dstFileName = "$rawBaseName$suffix$ext"
+    $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
 
-        # Extract true creation timestamp (Google Photos JSON or internal metadata)
-        $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
-        $targetDt = $trueTimeInfo.DateTime
-        $timeSrcName = $trueTimeInfo.Source
+    # Extract true creation timestamp (Google Photos JSON or internal metadata)
+    $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
+    $targetDt = $trueTimeInfo.DateTime
+    $timeSrcName = $trueTimeInfo.Source
 
-        Write-Host "`n[動画 $vIdx/$($videoFiles.Count)] 処理開始: $($srcItem.Name)" -ForegroundColor Cyan
-        Write-Host "  撮影日時検出: $($targetDt.ToString('yyyy-MM-dd HH:mm:ss')) (ソース: $timeSrcName)" -ForegroundColor Green
-        Write-Host "  最終出力先  : $dstFile" -ForegroundColor Gray
+    Write-Host "`n[動画 $vIdx/$($videoFiles.Count)] 処理開始: $($srcItem.Name)" -ForegroundColor Cyan
+    Write-Host "  撮影日時検出: $($targetDt.ToString('yyyy-MM-dd HH:mm:ss')) (ソース: $timeSrcName)" -ForegroundColor Green
+    Write-Host "  最終出力先  : $dstFile" -ForegroundColor Gray
 
-        if (Test-Path $dstFile) {
-            Remove-Item $dstFile -Force
-        }
+    if (Test-Path $dstFile) {
+        Remove-Item $dstFile -Force
+    }
 
-        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-        # Calculate final yaw offset (direct offset or from CenterTime)
-        $finalYaw = $YawOffset
+    # Calculate final yaw offset (direct offset or from CenterTime)
+    $finalYaw = $YawOffset
 
-        if ($AudioCodec -in 'FLAC', 'PCM' -and $hasMovieConverter) {
-            # Intermediate stitch file in RAMDISK/TEMP directory
-            $tempStitch = [System.IO.Path]::Combine($workingTempDir, "theta_stitch_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
-            $tempWav = [System.IO.Path]::Combine($workingTempDir, "theta_audio_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
-            $tempMov = [System.IO.Path]::Combine($workingTempDir, "theta_mov_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
+    if ($AudioCodec -in 'FLAC', 'PCM' -and $hasMovieConverter) {
+        # Intermediate stitch file in RAMDISK/TEMP directory
+        $tempStitch = [System.IO.Path]::Combine($workingTempDir, "theta_stitch_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
+        $tempWav = [System.IO.Path]::Combine($workingTempDir, "theta_audio_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
+        $tempMov = [System.IO.Path]::Combine($workingTempDir, "theta_mov_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
 
-            Write-Host "  (1/3) 公式天頂補正スティッチ実行中 (DualfishBlender)..." -ForegroundColor Yellow
-            $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$tempStitch`""
-            $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-            $pinfo.FileName = $blenderPath
-            $pinfo.Arguments = $arguments
-            $pinfo.WorkingDirectory = $resourcesPath
-            $pinfo.UseShellExecute = $false
-            $procBlender = [System.Diagnostics.Process]::Start($pinfo)
-            $procBlender.WaitForExit()
+        Write-Host "  (1/3) 公式天頂補正スティッチ実行中 (DualfishBlender)..." -ForegroundColor Yellow
+        $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$tempStitch`""
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName = $blenderPath
+        $pinfo.Arguments = $arguments
+        $pinfo.WorkingDirectory = $resourcesPath
+        $pinfo.UseShellExecute = $false
+        $procBlender = [System.Diagnostics.Process]::Start($pinfo)
+        $procBlender.WaitForExit()
 
-            if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
-                Write-Host "  (2/3) 公式4ch空間音声展開中 (RICOH THETA Movie Converter)..." -ForegroundColor Yellow
-                $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -StitchedMp4Path $tempStitch -TempWav $tempWav -TempMov $tempMov -WorkDir $workingTempDir
+        if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
+            Write-Host "  (2/3) 公式4ch空間音声展開中 (RICOH THETA Movie Converter)..." -ForegroundColor Yellow
+            $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -StitchedMp4Path $tempStitch -TempWav $tempWav -TempMov $tempMov -WorkDir $workingTempDir
 
-                Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
+            Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
 
-                $audioParams = ""
-                $fmtParam = ""
-                switch ($AudioCodec) {
-                    'FLAC' {
-                        $audioParams = "-c:a flac -channel_layout quad"
-                        $fmtParam = "-f mp4"
-                    }
-                    'PCM' {
-                        $audioParams = "-c:a copy"
-                    }
+            $audioParams = ""
+            $fmtParam = ""
+            switch ($AudioCodec) {
+                'FLAC' {
+                    $audioParams = "-c:a flac -channel_layout quad"
+                    $fmtParam = "-f mp4"
                 }
-
-                $vFilterParam = if ($finalYaw -ne 0.0) { "-vf `"v360=e:e:yaw=$finalYaw`"" } else { "" }
-                $vCodecParam = if ($vFilterParam) { "-c:v h264_nvenc -b:v 56000000" } else { "-c:v copy" }
-
-                # If MOV + PCM with no yaw adjustment, directly use official Movie Converter output (preserves 100% native SA3D atom)
-                if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($finalYaw -eq 0.0)) {
-                    Move-Item $tempMov $dstFile -Force
-                    $muxSuccess = $true
-                } elseif (Test-Path $tempMov) {
-                    $ffmpegCmd = "ffmpeg -i `"$tempMov`" $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
-                    cmd.exe /c $ffmpegCmd
-                    $muxSuccess = (Test-Path $dstFile)
-                } elseif (Test-Path $tempWav) {
-                    $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
-                    cmd.exe /c $ffmpegCmd
-                    $muxSuccess = (Test-Path $dstFile)
-                } else {
-                    $muxSuccess = $false
+                'PCM' {
+                    $audioParams = "-c:a copy"
                 }
-
-                Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
-                Remove-Item $tempWav -Force -ErrorAction SilentlyContinue
-                Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
-
-                if ($muxSuccess -and (Test-Path $dstFile)) {
-                    exiftool -TagsFromFile "$($srcItem.FullName)" -time:all -overwrite_original "$dstFile" *>$null
-                    $dstItem = Get-Item $dstFile
-                    $dstItem.CreationTime = $targetDt
-                    $dstItem.LastWriteTime = $targetDt
-                    $dstItem.LastAccessTime = $targetDt
-                    $stopwatch.Stop()
-                    Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 4ch $AudioCodec 空間音声・タイムスタンプ自動同期完了" -ForegroundColor Green
-                } else {
-                    Write-Error "  [NG] 空間音声の結合に失敗しました。"
-                }
-            } else {
-                Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
-                Write-Error "  [NG] DualfishBlender による映像スティッチに失敗しました (ExitCode: $($procBlender.ExitCode))"
             }
-        } else {
-            # Standard video-only conversion
-            $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$dstFile`""
-            $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-            $pinfo.FileName = $blenderPath
-            $pinfo.Arguments = $arguments
-            $pinfo.WorkingDirectory = $resourcesPath
-            $pinfo.UseShellExecute = $false
-            $procBlender = [System.Diagnostics.Process]::Start($pinfo)
-            $procBlender.WaitForExit()
 
-            if ($procBlender.ExitCode -eq 0 -and (Test-Path $dstFile)) {
+            $vFilterParam = if ($finalYaw -ne 0.0) { "-vf `"v360=e:e:yaw=$finalYaw`"" } else { "" }
+            $vCodecParam = if ($vFilterParam) { "-c:v h264_nvenc -b:v 56000000" } else { "-c:v copy" }
+
+            # If MOV + PCM with no yaw adjustment, directly use official Movie Converter output (preserves 100% native SA3D atom)
+            if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($finalYaw -eq 0.0)) {
+                Move-Item $tempMov $dstFile -Force
+                $muxSuccess = $true
+            } elseif (Test-Path $tempMov) {
+                $ffmpegCmd = "ffmpeg -i `"$tempMov`" $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
+                cmd.exe /c $ffmpegCmd
+                $muxSuccess = (Test-Path $dstFile)
+            } elseif (Test-Path $tempWav) {
+                $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
+                cmd.exe /c $ffmpegCmd
+                $muxSuccess = (Test-Path $dstFile)
+            } else {
+                $muxSuccess = $false
+            }
+
+            Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempWav -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
+
+            if ($muxSuccess -and (Test-Path $dstFile)) {
+                exiftool -TagsFromFile "$($srcItem.FullName)" -time:all -overwrite_original "$dstFile" *>$null
                 $dstItem = Get-Item $dstFile
                 $dstItem.CreationTime = $targetDt
                 $dstItem.LastWriteTime = $targetDt
                 $dstItem.LastAccessTime = $targetDt
-                Write-Host "  [OK] 変換完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムスタンプ自動同期完了" -ForegroundColor Green
+                $stopwatch.Stop()
+                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 4ch $AudioCodec 空間音声・タイムスタンプ自動同期完了" -ForegroundColor Green
             } else {
-                Write-Error "  [NG] DualfishBlender がエラー終了しました (ExitCode: $($procBlender.ExitCode))"
+                Write-Error "  [NG] 空間音声の結合に失敗しました。"
             }
+        } else {
+            Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
+            Write-Error "  [NG] DualfishBlender による映像スティッチに失敗しました (ExitCode: $($procBlender.ExitCode))"
         }
-    }
-}
-#endregion
+    } else {
+        # Standard video-only conversion
+        $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$dstFile`""
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName = $blenderPath
+        $pinfo.Arguments = $arguments
+        $pinfo.WorkingDirectory = $resourcesPath
+        $pinfo.UseShellExecute = $false
+        $procBlender = [System.Diagnostics.Process]::Start($pinfo)
+        $procBlender.WaitForExit()
 
-#region Batch Execution - Images
-if ($imageFiles.Count -gt 0) {
-    Write-Host "`n============================================================" -ForegroundColor Cyan
-    Write-Host "静止画自動水平補正 (カメラ固有オフセット Pitch: -3.0°, Roll: +3.5°):" -ForegroundColor Green
-    Write-Host "============================================================" -ForegroundColor Cyan
-
-    $imgIdx = 0
-    foreach ($imgFile in $imageFiles) {
-        $imgIdx++
-        $srcItem = Get-Item $imgFile
-        $dir = if ($OutputDir) { $OutputDir } else { $srcItem.DirectoryName }
-        $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
-        $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
-        $ext = [System.IO.Path]::GetExtension($srcItem.Name)
-        
-        $yawTag = if ($YawOffset -ne 0.0) { "_yaw$YawOffset" } else { "" }
-        $dstFileName = "${rawBaseName}_st$yawTag$ext"
-        $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
-
-        $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
-        $targetDt = $trueTimeInfo.DateTime
-        $timeSrcName = $trueTimeInfo.Source
-
-        Write-Host "`n[静止画 $imgIdx/$($imageFiles.Count)] 水平補正中: $($srcItem.Name)" -ForegroundColor Cyan
-        Write-Host "  撮影日時検出: $($targetDt.ToString('yyyy-MM-dd HH:mm:ss')) (ソース: $timeSrcName)" -ForegroundColor Green
-        Write-Host "  出力先: $dstFile" -ForegroundColor Gray
-
-        if (Test-Path $dstFile) {
-            Remove-Item $dstFile -Force
-        }
-
-        # Apply v360 level correction with optional yaw
-        $yawVal = $YawOffset
-        $ffCmd = "ffmpeg -i `"$($srcItem.FullName)`" -vf `"v360=e:e:pitch=-3.0:roll=3.5:yaw=$yawVal`" -q:v 2 `"$dstFile`" -y -loglevel error"
-        cmd.exe /c $ffCmd
-
-        if (Test-Path $dstFile) {
-            # Copy all EXIF/XMP tags
-            exiftool -TagsFromFile "$($srcItem.FullName)" -all:all -overwrite_original "$dstFile" *>$null
+        if ($procBlender.ExitCode -eq 0 -and (Test-Path $dstFile)) {
             $dstItem = Get-Item $dstFile
             $dstItem.CreationTime = $targetDt
             $dstItem.LastWriteTime = $targetDt
             $dstItem.LastAccessTime = $targetDt
-            Write-Host "  [OK] 水平化完了 - 360度パノラマタグ・タイムスタンプ同期完了" -ForegroundColor Green
+            Write-Host "  [OK] 変換完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムスタンプ自動同期完了" -ForegroundColor Green
         } else {
-            Write-Error "  [NG] 静止画の水平補正に失敗しました。"
+            Write-Error "  [NG] DualfishBlender がエラー終了しました (ExitCode: $($procBlender.ExitCode))"
         }
     }
 }
@@ -671,5 +610,5 @@ try {
 } catch { }
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "すべての処理が完了しました (動画: $($videoFiles.Count) 件, 静止画: $($imageFiles.Count) 件)" -ForegroundColor Green
+Write-Host "すべての処理が完了しました (動画: $($videoFiles.Count) 件)" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
