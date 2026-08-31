@@ -6,6 +6,8 @@
     MP4やFLAC等の非対応形式で変換してしまったRICOH THETA動画や未加工動画（*.MP4）から、
     公式エンジン（DualfishBlender + RICOH THETA Movie Converter）を用いて、
     YouTube / Google / Meta Quest 等で100%空間音声として自動認識される公式標準 MOV (PCM 4ch + SA3D内蔵) ファイルを一括生成・復元します。
+    また、AndroidやGoogleフォトで発生するタイムゾーン（UTC/JST +9時間）計算ズレを解消するため、
+    QuickTimeタグ（UTC）およびKeys:CreationDate（タイムゾーン付きローカル日時）を完全自動同期します。
     
     【処理内容別ファイル名サフィックス規則】
       - 空間方位固定 (推奨)   : *_er_spatial.mov
@@ -133,7 +135,7 @@ function Get-MediaTrueTimestamp {
     $fileItem = Get-Item $FilePath
     $dir = $fileItem.DirectoryName
     $name = $fileItem.Name
-    $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+    $cleanRegex = '(_er|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
     $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace $cleanRegex, ''
 
     $jsonCandidates = @(
@@ -152,6 +154,13 @@ function Get-MediaTrueTimestamp {
                         return @{ DateTime = $dt; Source = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))" }
                     }
                 }
+                if ($jsonContent.creationTime -and $jsonContent.creationTime.timestamp) {
+                    $tsLong = [int64]$jsonContent.creationTime.timestamp
+                    if ($tsLong -gt 0) {
+                        $dt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
+                        return @{ DateTime = $dt; Source = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))" }
+                    }
+                }
             } catch { }
         }
     }
@@ -165,6 +174,37 @@ function Get-MediaTrueTimestamp {
     } catch { }
 
     return @{ DateTime = $fileItem.LastWriteTime; Source = "FileSystem" }
+}
+#endregion
+
+#region Accurate Timestamp Injector
+function Set-AccurateMediaTimestamp {
+    param (
+        [string]$FilePath,
+        [datetime]$TargetDateTime
+    )
+    $utcDt = $TargetDateTime.ToUniversalTime()
+    $dtUtcStr = $utcDt.ToString("yyyy:MM:dd HH:mm:ss")
+    $dtIsoLocalStr = $TargetDateTime.ToString("yyyy-MM-ddTHH:mm:sszzz")
+
+    exiftool -overwrite_original `
+        "-QuickTime:CreateDate=$dtUtcStr" `
+        "-QuickTime:ModifyDate=$dtUtcStr" `
+        "-QuickTime:TrackCreateDate=$dtUtcStr" `
+        "-QuickTime:TrackModifyDate=$dtUtcStr" `
+        "-QuickTime:MediaCreateDate=$dtUtcStr" `
+        "-QuickTime:MediaModifyDate=$dtUtcStr" `
+        "-Keys:CreationDate=$dtIsoLocalStr" `
+        "-UserData:DateTimeOriginal=$dtIsoLocalStr" `
+        "-XMP:DateTimeOriginal=$dtIsoLocalStr" `
+        "-XMP:CreateDate=$dtIsoLocalStr" `
+        "-XMP:ModifyDate=$dtIsoLocalStr" `
+        "$FilePath" *>$null
+
+    $dstItem = Get-Item $FilePath
+    $dstItem.CreationTime = $TargetDateTime
+    $dstItem.LastWriteTime = $TargetDateTime
+    $dstItem.LastAccessTime = $TargetDateTime
 }
 #endregion
 
@@ -270,7 +310,7 @@ foreach ($srcFile in $inputFiles) {
     $idx++
     $srcItem = Get-Item $srcFile
     $dir = $srcItem.DirectoryName
-    $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+    $cleanRegex = '(_er|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
     $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
     
     # Feature distinct naming rule: R0010390.MP4 -> R0010390_er_spatial.mov
@@ -326,13 +366,9 @@ foreach ($srcFile in $inputFiles) {
         if ((Test-Path $tempMov) -and (Get-Item $tempMov).Length -gt 0) {
             Move-Item $tempMov $dstFile -Force
 
-            exiftool -TagsFromFile "$rawFile" -time:all -overwrite_original "$dstFile" *>$null
-            $dstItem = Get-Item $dstFile
-            $dstItem.CreationTime = $targetDt
-            $dstItem.LastWriteTime = $targetDt
-            $dstItem.LastAccessTime = $targetDt
+            Set-AccurateMediaTimestamp -FilePath $dstFile -TargetDateTime $targetDt
             $stopwatch.Stop()
-            Write-Host "  [OK] 復元完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - YouTube空間音声完全対応(SA3D内蔵) MOV生成完了" -ForegroundColor Green
+            Write-Host "  [OK] 復元完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムゾーン完全同期(SA3D内蔵) MOV生成完了" -ForegroundColor Green
         } else {
             Write-Error "  [NG] Movie Converter による空間音声MOV生成に失敗しました。"
         }

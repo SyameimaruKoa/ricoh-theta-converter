@@ -8,6 +8,8 @@
     認識される高品質なEquirectangular動画を生成します。
     正面回転オフセット（-YawOffset）やタイムコード指定時にも、映像の回転に合わせて4ch空間音声（Ambisonics）の音響定位も数学的回転行列で完全連動回転させ、
     さらにGoogle公式SpatialMedia（Spherical Video + SA3D Audio）メタデータを完全自動注入します。
+    また、AndroidやGoogleフォトで発生するタイムゾーン（UTC/JST +9時間）計算ズレを解消するため、
+    QuickTimeタグ（UTC）およびKeys:CreationDate（タイムゾーン付きローカル日時）を完全自動同期します。
     
     【処理内容別ファイル名サフィックス規則】
     どのような処理が行われたかがファイル名だけで完全に判別・区別できるように自動命名されます：
@@ -314,6 +316,38 @@ except Exception as e:
     $exitCode = $LASTEXITCODE
     Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
     return ($exitCode -eq 0)
+}
+#endregion
+
+#region Accurate Timestamp Injector (UTC & Local TimeZone Awareness for Android/Google Photos)
+function Set-AccurateMediaTimestamp {
+    param (
+        [string]$FilePath,
+        [datetime]$TargetDateTime
+    )
+    $utcDt = $TargetDateTime.ToUniversalTime()
+    $dtUtcStr = $utcDt.ToString("yyyy:MM:dd HH:mm:ss")
+    $dtIsoLocalStr = $TargetDateTime.ToString("yyyy-MM-ddTHH:mm:sszzz")
+    $dtLocalStr = $TargetDateTime.ToString("yyyy:MM:dd HH:mm:ss")
+
+    exiftool -overwrite_original `
+        "-QuickTime:CreateDate=$dtUtcStr" `
+        "-QuickTime:ModifyDate=$dtUtcStr" `
+        "-QuickTime:TrackCreateDate=$dtUtcStr" `
+        "-QuickTime:TrackModifyDate=$dtUtcStr" `
+        "-QuickTime:MediaCreateDate=$dtUtcStr" `
+        "-QuickTime:MediaModifyDate=$dtUtcStr" `
+        "-Keys:CreationDate=$dtIsoLocalStr" `
+        "-UserData:DateTimeOriginal=$dtIsoLocalStr" `
+        "-XMP:DateTimeOriginal=$dtIsoLocalStr" `
+        "-XMP:CreateDate=$dtIsoLocalStr" `
+        "-XMP:ModifyDate=$dtIsoLocalStr" `
+        "$FilePath" *>$null
+
+    $dstItem = Get-Item $FilePath
+    $dstItem.CreationTime = $TargetDateTime
+    $dstItem.LastWriteTime = $TargetDateTime
+    $dstItem.LastAccessTime = $TargetDateTime
 }
 #endregion
 
@@ -645,13 +679,11 @@ foreach ($srcFile in $videoFiles) {
             Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
 
             if ($muxSuccess -and (Test-Path $dstFile)) {
-                exiftool -TagsFromFile "$($srcItem.FullName)" -time:all -overwrite_original "$dstFile" *>$null
-                $dstItem = Get-Item $dstFile
-                $dstItem.CreationTime = $targetDt
-                $dstItem.LastWriteTime = $targetDt
-                $dstItem.LastAccessTime = $targetDt
+                # Synchronize accurate UTC and Local timezone timestamps for Android/Google Photos
+                Set-AccurateMediaTimestamp -FilePath $dstFile -TargetDateTime $targetDt
+
                 $stopwatch.Stop()
-                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 360度映像・4ch空間音声連動同期・タイムスタンプ完全同期完了" -ForegroundColor Green
+                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 360度映像・4ch空間音声連動同期・タイムゾーン完全同期完了" -ForegroundColor Green
             } else {
                 Write-Error "  [NG] 空間音声の結合に失敗しました。"
             }
@@ -671,11 +703,8 @@ foreach ($srcFile in $videoFiles) {
         $procBlender.WaitForExit()
 
         if ($procBlender.ExitCode -eq 0 -and (Test-Path $dstFile)) {
-            $dstItem = Get-Item $dstFile
-            $dstItem.CreationTime = $targetDt
-            $dstItem.LastWriteTime = $targetDt
-            $dstItem.LastAccessTime = $targetDt
-            Write-Host "  [OK] 変換完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムスタンプ自動同期完了" -ForegroundColor Green
+            Set-AccurateMediaTimestamp -FilePath $dstFile -TargetDateTime $targetDt
+            Write-Host "  [OK] 変換完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムゾーン完全同期完了" -ForegroundColor Green
         } else {
             Write-Error "  [NG] DualfishBlender がエラー終了しました (ExitCode: $($procBlender.ExitCode))"
         }
