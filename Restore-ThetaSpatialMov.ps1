@@ -3,13 +3,14 @@
     変換済み動画または未加工動画から、YouTube/VR空間音声(SA3D内蔵)完全対応のMOV形式へ復元・一括再変換します。
 
 .DESCRIPTION
-    MP4やFLAC等の非対応形式で変換してしまったRICOH THETA動画（*_corrected.mp4）や未加工動画（*.MP4）から、
+    MP4やFLAC等の非対応形式で変換してしまったRICOH THETA動画や未加工動画（*.MP4）から、
     公式エンジン（DualfishBlender + RICOH THETA Movie Converter）を用いて、
     YouTube / Google / Meta Quest 等で100%空間音声として自動認識される公式標準 MOV (PCM 4ch + SA3D内蔵) ファイルを一括生成・復元します。
+    出力ファイル名は公式 Movie Converter と完全に同一の命名規則（例: R0010390.MP4 -> R0010390.mov）を採用しています。
     RAMDISK（R:\ 等）の自動検出と中間作業領域の完全RAM化、GoogleフォトJSONやEXIFからの撮影日時自動復元に対応しています。
 
 .PARAMETER Path
-    復元・変換対象の動画ファイルパス（*_corrected.mp4 または未加工生動画 *.MP4、複数指定・ワイルドカード対応）。
+    復元・変換対象の動画ファイルパス（未加工生動画 *.MP4 または変換済み動画、複数指定・ワイルドカード対応）。
 
 .PARAMETER Mode
     スタビライズ・方位固定モード（Spatial: 空間方位固定 / Camera: カメラ正面追従 / Lock: 方位ロック / ImageBlur: 手ブレ補正ON）。
@@ -24,7 +25,7 @@
     ヘルプ情報を表示します（-h または --help）。
 
 .EXAMPLE
-    .\Restore-ThetaSpatialMov.ps1 -Path .\R0010390_corrected.mp4
+    .\Restore-ThetaSpatialMov.ps1 -Path .\R0010390.MP4
 
 .EXAMPLE
     .\Restore-ThetaSpatialMov.ps1 *.MP4 -NonInteractive
@@ -126,7 +127,7 @@ function Get-MediaTrueTimestamp {
     $fileItem = Get-Item $FilePath
     $dir = $fileItem.DirectoryName
     $name = $fileItem.Name
-    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name).Replace('_corrected', '')
+    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name).Replace('_corrected', '').Replace('_stitched', '')
 
     $jsonCandidates = @(
         (Join-Path $dir "$name.json"),
@@ -253,10 +254,12 @@ foreach ($srcFile in $inputFiles) {
     $idx++
     $srcItem = Get-Item $srcFile
     $dir = $srcItem.DirectoryName
-    $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name).Replace('_corrected', '')
-    $dstFile = [System.IO.Path]::Combine($dir, "${rawBaseName}_corrected.mov")
+    $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name).Replace('_corrected', '').Replace('_stitched', '')
+    
+    # Official naming rule: R0010390.MP4 -> R0010390.mov
+    $dstFile = [System.IO.Path]::Combine($dir, "$rawBaseName.mov")
 
-    # Find raw THETA MP4 file if input is already corrected MP4
+    # Find raw THETA MP4 file if input is already converted MP4
     $rawCandidates = @(
         (Join-Path $dir "$rawBaseName.MP4"),
         (Join-Path $dir "$rawBaseName.mp4"),
