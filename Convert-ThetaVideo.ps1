@@ -6,7 +6,8 @@
     RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
     純正パイプラインを100%そのまま使用し、YouTubeやVRプレイヤー・VLC・Googleフォトで確実に360度空間映像・空間音声（Ambisonics SA3D）として
     認識される高品質なEquirectangular動画を生成します。
-    正面回転オフセット（-YawOffset）やタイムコード指定時にも、Google公式SpatialMediaメタデータを完全自動注入し、360度認識を保証します。
+    正面回転オフセット（-YawOffset）やタイムコード指定時にも、映像の回転に合わせて4ch空間音声（Ambisonics）の音響定位も数学的回転行列で完全連動回転させ、
+    さらにGoogle公式SpatialMedia（Spherical Video + SA3D Audio）メタデータを完全自動注入します。
     
     【処理内容別ファイル名サフィックス規則】
     どのような処理が行われたかがファイル名だけで完全に判別・区別できるように自動命名されます：
@@ -252,13 +253,38 @@ function Get-MediaTrueTimestamp {
 }
 #endregion
 
-#region Spherical 360 Video Metadata Injector (Google SpatialMedia)
-function Inject-Spherical360Metadata {
+#region Ambisonics Rotation Filter Helper (Mathematical Yaw Rotation for 4ch B-format)
+function Get-AmbisonicsRotationFilter {
+    param (
+        [double]$YawDeg
+    )
+    $rad = $YawDeg * [Math]::PI / 180.0
+    $cos = [Math]::Cos($rad)
+    $sin = [Math]::Sin($rad)
+    
+    # AmbiX ACN Channel Mapping:
+    # c0: W (Omnidirectional / unchanged)
+    # c1: Y' = Y*cos(rad) + X*sin(rad)
+    # c2: Z (Vertical / unchanged)
+    # c3: X' = -Y*sin(rad) + X*cos(rad)
+    $cosStr = $cos.ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
+    $sinStr = $sin.ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
+    $negSinStr = (-$sin).ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
+
+    return "pan=4c|c0=c0|c1=${cosStr}*c1+${sinStr}*c3|c2=c2|c3=${negSinStr}*c1+${cosStr}*c3"
+}
+#endregion
+
+#region Spherical 360 Video & SA3D Spatial Audio Metadata Injector (Google SpatialMedia)
+function Inject-SphericalAndSpatialAudioMetadata {
     param (
         [string]$TargetMoviePath,
         [string]$ToolsDir,
-        [string]$WorkDir
+        [string]$WorkDir,
+        [bool]$HasSpatialAudio
     )
+    $audioArg = if ($HasSpatialAudio) { "metadata.audio = metadata_utils.get_spatial_audio_metadata(ambisonic_order=1, head_locked_stereo=False)" } else { "" }
+    
     $pyScript = @"
 import sys, os, shutil
 tools_dir = r'$ToolsDir'
@@ -270,6 +296,7 @@ try:
     from spatialmedia import metadata_utils
     metadata = metadata_utils.Metadata()
     metadata.video = metadata_utils.generate_spherical_xml()
+    $audioArg
     temp_out = os.path.join(work_dir, 'theta_inj_' + os.path.basename(target))
     metadata_utils.inject_metadata(target, temp_out, metadata, lambda s: None)
     if os.path.exists(temp_out) and os.path.getsize(temp_out) > 0:
@@ -567,6 +594,17 @@ foreach ($srcFile in $videoFiles) {
 
             Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
 
+            $vFilterParam = if ($finalYaw -ne 0.0) { "-vf `"v360=e:e:yaw=$finalYaw`"" } else { "" }
+            $vCodecParam = if ($vFilterParam) { "-c:v h264_nvenc -b:v 56000000" } else { "-c:v copy" }
+
+            # Audio rotation filter: if yaw is applied, rotate 4ch Ambisonics coordinates to match video rotation
+            $aFilterParam = if ($finalYaw -ne 0.0 -and $AudioCodec -eq 'PCM') {
+                $ambixPan = Get-AmbisonicsRotationFilter -YawDeg $finalYaw
+                "-af `"$ambixPan`""
+            } else {
+                ""
+            }
+
             $audioParams = ""
             $fmtParam = ""
             switch ($AudioCodec) {
@@ -575,14 +613,11 @@ foreach ($srcFile in $videoFiles) {
                     $fmtParam = "-f mp4"
                 }
                 'PCM' {
-                    $audioParams = "-c:a copy"
+                    $audioParams = if ($aFilterParam) { "$aFilterParam -c:a pcm_s16le" } else { "-c:a copy" }
                 }
             }
 
-            $vFilterParam = if ($finalYaw -ne 0.0) { "-vf `"v360=e:e:yaw=$finalYaw`"" } else { "" }
-            $vCodecParam = if ($vFilterParam) { "-c:v h264_nvenc -b:v 56000000" } else { "-c:v copy" }
-
-            # If MOV + PCM with no yaw adjustment, directly use official Movie Converter output (preserves 100% native SA3D atom)
+            # If MOV + PCM with NO yaw adjustment, directly use official Movie Converter output
             if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($finalYaw -eq 0.0)) {
                 Move-Item $tempMov $dstFile -Force
                 $muxSuccess = $true
@@ -590,16 +625,16 @@ foreach ($srcFile in $videoFiles) {
                 $ffmpegCmd = "ffmpeg -i `"$tempMov`" $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                 cmd.exe /c $ffmpegCmd
                 $muxSuccess = (Test-Path $dstFile)
-                if ($muxSuccess -and $vFilterParam) {
-                    # Inject 360 Spherical metadata because ffmpeg re-encode drops it
-                    Inject-Spherical360Metadata -TargetMoviePath $dstFile -ToolsDir (Join-Path $scriptDir "tools") -WorkDir $workingTempDir | Out-Null
+                if ($muxSuccess) {
+                    # Inject 360 Spherical Video & SA3D Spatial Audio metadata
+                    Inject-SphericalAndSpatialAudioMetadata -TargetMoviePath $dstFile -ToolsDir (Join-Path $scriptDir "tools") -WorkDir $workingTempDir -HasSpatialAudio ($AudioCodec -eq 'PCM') | Out-Null
                 }
             } elseif (Test-Path $tempWav) {
                 $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                 cmd.exe /c $ffmpegCmd
                 $muxSuccess = (Test-Path $dstFile)
                 if ($muxSuccess) {
-                    Inject-Spherical360Metadata -TargetMoviePath $dstFile -ToolsDir (Join-Path $scriptDir "tools") -WorkDir $workingTempDir | Out-Null
+                    Inject-SphericalAndSpatialAudioMetadata -TargetMoviePath $dstFile -ToolsDir (Join-Path $scriptDir "tools") -WorkDir $workingTempDir -HasSpatialAudio ($AudioCodec -eq 'PCM') | Out-Null
                 }
             } else {
                 $muxSuccess = $false
@@ -616,7 +651,7 @@ foreach ($srcFile in $videoFiles) {
                 $dstItem.LastWriteTime = $targetDt
                 $dstItem.LastAccessTime = $targetDt
                 $stopwatch.Stop()
-                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 360度空間メタデータ・4ch $AudioCodec 音声・タイムスタンプ完全同期完了" -ForegroundColor Green
+                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 360度映像・4ch空間音声連動同期・タイムスタンプ完全同期完了" -ForegroundColor Green
             } else {
                 Write-Error "  [NG] 空間音声の結合に失敗しました。"
             }
