@@ -6,7 +6,13 @@
     MP4やFLAC等の非対応形式で変換してしまったRICOH THETA動画や未加工動画（*.MP4）から、
     公式エンジン（DualfishBlender + RICOH THETA Movie Converter）を用いて、
     YouTube / Google / Meta Quest 等で100%空間音声として自動認識される公式標準 MOV (PCM 4ch + SA3D内蔵) ファイルを一括生成・復元します。
-    出力ファイル名は公式アプリと完全に同一の命名規則（例: R0010390.MP4 -> R0010390_er.mov）を採用しています。
+    
+    【処理内容別ファイル名サフィックス規則】
+      - 空間方位固定 (推奨)   : *_er_spatial.mov
+      - カメラ正面追従       : *_er_cam.mov
+      - 方位完全ロック       : *_er_lock.mov
+      - 手ブレ補正ON (公式)   : *_er.mov
+
     RAMDISK（R:\ 等）の自動検出と中間作業領域の完全RAM化、GoogleフォトJSONやEXIFからの撮影日時自動復元に対応しています。
 
 .PARAMETER Path
@@ -28,7 +34,7 @@
     .\Restore-ThetaSpatialMov.ps1 -Path .\R0010390.MP4
 
 .EXAMPLE
-    .\Restore-ThetaSpatialMov.ps1 *.MP4 -NonInteractive
+    .\Restore-ThetaSpatialMov.ps1 *.MP4 -Mode Spatial -NonInteractive
 
 .EXAMPLE
     .\Restore-ThetaSpatialMov.ps1 -h
@@ -127,7 +133,8 @@ function Get-MediaTrueTimestamp {
     $fileItem = Get-Item $FilePath
     $dir = $fileItem.DirectoryName
     $name = $fileItem.Name
-    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace '(_er|_st|_corrected|_stitched)$', ''
+    $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace $cleanRegex, ''
 
     $jsonCandidates = @(
         (Join-Path $dir "$name.json"),
@@ -238,6 +245,14 @@ $stabilizeOpt = switch ($Mode) {
     'ImageBlur' { "-stabilize:image" }
     default     { "-stabilize:-image" }
 }
+
+$modeSuffix = switch ($Mode) {
+    'Spatial'   { "_er_spatial" }
+    'Camera'    { "_er_cam" }
+    'Lock'      { "_er_lock" }
+    'ImageBlur' { "_er" }
+    default     { "_er_spatial" }
+}
 #endregion
 
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -245,6 +260,7 @@ Write-Host "   RICOH THETA 空間音声MOV (SA3D内蔵) 復元・再変換ツー
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "対象動画ファイル数 : $($inputFiles.Count) 件" -ForegroundColor White
 Write-Host "作業領域 (TEMP)    : $tempDisplayStr" -ForegroundColor Green
+Write-Host "スタビライズモード : $Mode ($modeSuffix)" -ForegroundColor Green
 Write-Host "出力形式           : MOV (.mov) [YouTube / VR 空間音声完全互換]" -ForegroundColor Green
 Write-Host "空間音声エンジン   : RICOH THETA Movie Converter 公式純正" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -254,10 +270,11 @@ foreach ($srcFile in $inputFiles) {
     $idx++
     $srcItem = Get-Item $srcFile
     $dir = $srcItem.DirectoryName
-    $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace '(_er|_st|_corrected|_stitched)$', ''
+    $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+    $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
     
-    # Official naming rule: R0010390.MP4 -> R0010390_er.mov
-    $dstFile = [System.IO.Path]::Combine($dir, "${rawBaseName}_er.mov")
+    # Feature distinct naming rule: R0010390.MP4 -> R0010390_er_spatial.mov
+    $dstFile = [System.IO.Path]::Combine($dir, "$rawBaseName$modeSuffix.mov")
 
     # Find raw THETA MP4 file if input is already converted MP4
     $rawCandidates = @(

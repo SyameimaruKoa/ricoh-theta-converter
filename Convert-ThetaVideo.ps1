@@ -6,13 +6,20 @@
     RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
     純正パイプラインを100%そのまま使用し、YouTubeやVRプレイヤーで確実に360度空間音声（Ambisonics SA3D）として認識される
     高品質なEquirectangular動画を生成します。
-    出力ファイル名はRICOH THETA公式アプリと完全に同一の命名規則（動画: *_er.mov / 静止画: *_st.jpg）を採用しています。
+    
+    【処理内容別ファイル名サフィックス規則】
+    どのような処理が行われたかがファイル名だけで完全に判別・区別できるように自動命名されます：
+      - 公式標準手ブレ補正ON   : *_er.mov / *_er.mp4
+      - 空間方位固定 (推奨)     : *_er_spatial.mov / *_er_spatial.mp4
+      - カメラ正面追従         : *_er_cam.mov / *_er_cam.mp4
+      - 方位完全ロック         : *_er_lock.mov / *_er_lock.mp4
+      - 正面方位回転あり       : *_er_spatial_yaw90.mov / *_er_cam_yaw-45.mov
+      - タイムコード正面指定   : *_er_spatial_tc000015.mov
+      - 静止画水平補正         : *_st.jpg / *_st_yaw90.jpg
+
     RAMDISK（R:\ 等）の自動検出と中間作業領域の完全RAM化に対応し、SSD書き込み寿命を強力に保護します。
     公式標準の MOV (PCM 4ch + SA3D内蔵) を最優先推奨・デフォルトとし、
-    空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
-    任意の方位角度（度）または動画タイムコード指定による正面位置の固定、
     GoogleフォトのメタデータJSON (例: *.MP4.json) や EXIF/QuickTime メタデータからの撮影日時・タイムスタンプ完全自動復元に対応しています。
-    また、静止画（.JPG）が渡された場合はカメラの姿勢オフセットを自動解消して水平化します。
 
 .PARAMETER Path
     変換対象のRICOH THETA未加工動画・静止画ファイルパス（複数指定、ワイルドカード、パイプライン対応）。
@@ -196,7 +203,8 @@ function Get-MediaTrueTimestamp {
     $fileItem = Get-Item $FilePath
     $dir = $fileItem.DirectoryName
     $name = $fileItem.Name
-    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace '(_er|_st|_corrected|_stitched)$', ''
+    $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace $cleanRegex, ''
 
     # 1. Search Google Photos JSON files: <name>.json, <name>.MP4.json, <nameWithoutExt>.json
     $jsonCandidates = @(
@@ -298,10 +306,10 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     # 1. Mode selection
     if ([string]::IsNullOrWhiteSpace($Mode)) {
         Write-Host "`n[1] スタビライズ / 方位固定モードを選択してください:" -ForegroundColor Yellow
-        Write-Host "  1: 空間方位固定 (ジャイロ天頂補正 + 空間方位固定, 画像ブレ補正OFF) [-stabilize:-image] [推奨/デフォルト]"
-        Write-Host "  2: カメラ正面追従 (ジャイロ天頂補正 + カメラレンズ正面追従) [-stabilize:off]"
-        Write-Host "  3: 方位完全ロック (ジャイロ天頂補正 + 撮影開始時の方位完全ロック) [-stabilize:lock]"
-        Write-Host "  4: 手ブレ補正ON (公式標準: ジャイロ天頂補正 + 画像認識手ブレ補正) [-stabilize:image]"
+        Write-Host "  1: 空間方位固定 (ジャイロ天頂補正 + 空間方位固定, 画像ブレ補正OFF) [_er_spatial] [推奨/デフォルト]"
+        Write-Host "  2: カメラ正面追従 (ジャイロ天頂補正 + カメラレンズ正面追従) [_er_cam]"
+        Write-Host "  3: 方位完全ロック (ジャイロ天頂補正 + 撮影開始時の方位完全ロック) [_er_lock]"
+        Write-Host "  4: 手ブレ補正ON (公式標準: ジャイロ天頂補正 + 画像認識手ブレ補正) [_er]"
         $modeChoice = Read-Host "選択 [1-4] (デフォルト: 1)"
         switch ($modeChoice.Trim()) {
             '2' { $Mode = 'Camera' }
@@ -382,6 +390,35 @@ switch ($Mode) {
 $optionsStr = $optionList -join " "
 #endregion
 
+#region Output Suffix Builder Helper (Unique Suffix per Feature)
+function Get-OutputSuffix {
+    param (
+        [string]$ProcessMode,
+        [double]$Yaw,
+        [string]$TimeCode
+    )
+    # Base mode suffix
+    $modeTag = switch ($ProcessMode) {
+        'Spatial'   { "_er_spatial" }
+        'Camera'    { "_er_cam" }
+        'Lock'      { "_er_lock" }
+        'ImageBlur' { "_er" }       # Official standard
+        default     { "_er" }
+    }
+
+    # Optional yaw / timecode tag
+    $extraTag = ""
+    if ($TimeCode) {
+        $tcClean = $TimeCode -replace '[^0-9]', ''
+        $extraTag = "_tc$tcClean"
+    } elseif ($Yaw -ne 0.0) {
+        $extraTag = "_yaw$Yaw"
+    }
+
+    return "$modeTag$extraTag"
+}
+#endregion
+
 #region Official Spatial Audio Converter Helper (RICOH THETA Movie Converter Pipeline)
 function Invoke-ExtractSpatialWav {
     param (
@@ -448,11 +485,13 @@ if ($videoFiles.Count -gt 0) {
         $vIdx++
         $srcItem = Get-Item $srcFile
         $dir = if ($OutputDir) { $OutputDir } else { $srcItem.DirectoryName }
-        $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace '(_er|_st|_corrected|_stitched)$', ''
+        $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+        $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
         $ext = "." + $Container.ToLowerInvariant()
 
-        # Official naming rule: Equirectangular converted videos get "_er" suffix (e.g. R0010390_er.mov / R0010390_er.mp4)
-        $dstFileName = "${rawBaseName}_er$ext"
+        # Build feature-distinct suffix
+        $suffix = Get-OutputSuffix -ProcessMode $Mode -Yaw $YawOffset -TimeCode $CenterTime
+        $dstFileName = "$rawBaseName$suffix$ext"
         $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
 
         # Extract true creation timestamp (Google Photos JSON or internal metadata)
@@ -581,11 +620,12 @@ if ($imageFiles.Count -gt 0) {
         $imgIdx++
         $srcItem = Get-Item $imgFile
         $dir = if ($OutputDir) { $OutputDir } else { $srcItem.DirectoryName }
-        $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace '(_er|_st|_corrected|_stitched)$', ''
+        $cleanRegex = '(_er|_st|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
+        $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
         $ext = [System.IO.Path]::GetExtension($srcItem.Name)
         
-        # Official naming rule: Stitched/stabilized images get "_st" suffix (e.g. R0010390_st.jpg)
-        $dstFileName = "${rawBaseName}_st$ext"
+        $yawTag = if ($YawOffset -ne 0.0) { "_yaw$YawOffset" } else { "" }
+        $dstFileName = "${rawBaseName}_st$yawTag$ext"
         $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
 
         $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
