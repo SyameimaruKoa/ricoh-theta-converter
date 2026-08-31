@@ -12,7 +12,7 @@ if "%~1"=="--help" goto HELP_SECTION
 if "%~1"=="/?" goto HELP_SECTION
 
 set SCRIPT_DIR=%~dp0
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Convert-ThetaVideo.ps1" -Path %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Convert-ThetaVideo.ps1" %*
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [ERROR] 変換処理中にエラーが発生しました。
@@ -38,6 +38,7 @@ echo   高品質な Equirectangular 形式へ一括変換します。
 echo.
 echo 【使い方】
 echo   1. 変換したい動画ファイル (*.MP4) をこのバッチファイルにドラッグ＆ドロップしてください。
+echo      (複数ファイルの一括ドロップに対応しています)
 echo.
 echo   2. 対話メニューが表示されます（Enter キーを押すだけで推奨設定で開始します）:
 echo      - スタビライズ方式: 空間方位固定 (推奨) / カメラ正面追従 / 方位ロック / 手ブレ補正ON
