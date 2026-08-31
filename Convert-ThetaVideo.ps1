@@ -5,7 +5,8 @@
 .DESCRIPTION
     RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
     純正パイプラインを100%そのまま使用し、YouTubeやVRプレイヤーで確実に360度空間音声（Ambisonics SA3D）として認識される
-    高品質なEquirectangular動画を生成します。出力ファイル名は公式ツールと完全に同一の命名規則（例: R0010390.MP4 -> R0010390.mov）を採用しています。
+    高品質なEquirectangular動画を生成します。
+    出力ファイル名はRICOH THETA公式アプリと完全に同一の命名規則（動画: *_er.mov / 静止画: *_st.jpg）を採用しています。
     RAMDISK（R:\ 等）の自動検出と中間作業領域の完全RAM化に対応し、SSD書き込み寿命を強力に保護します。
     公式標準の MOV (PCM 4ch + SA3D内蔵) を最優先推奨・デフォルトとし、
     空間方位固定/カメラ正面追従/方位ロック/手ブレ補正ONの切り替え、
@@ -195,7 +196,7 @@ function Get-MediaTrueTimestamp {
     $fileItem = Get-Item $FilePath
     $dir = $fileItem.DirectoryName
     $name = $fileItem.Name
-    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name).Replace('_corrected', '').Replace('_stitched', '')
+    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace '(_er|_st|_corrected|_stitched)$', ''
 
     # 1. Search Google Photos JSON files: <name>.json, <name>.MP4.json, <nameWithoutExt>.json
     $jsonCandidates = @(
@@ -447,15 +448,12 @@ if ($videoFiles.Count -gt 0) {
         $vIdx++
         $srcItem = Get-Item $srcFile
         $dir = if ($OutputDir) { $OutputDir } else { $srcItem.DirectoryName }
-        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name)
+        $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace '(_er|_st|_corrected|_stitched)$', ''
         $ext = "." + $Container.ToLowerInvariant()
 
-        # Official naming rule (e.g. R0010390.MP4 -> R0010390.mov)
-        $dstFileName = "$baseName$ext"
+        # Official naming rule: Equirectangular converted videos get "_er" suffix (e.g. R0010390_er.mov / R0010390_er.mp4)
+        $dstFileName = "${rawBaseName}_er$ext"
         $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
-        if ($dstFile -eq $srcItem.FullName) {
-            $dstFile = [System.IO.Path]::Combine($dir, "${baseName}_stitched$ext")
-        }
 
         # Extract true creation timestamp (Google Photos JSON or internal metadata)
         $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
@@ -477,9 +475,9 @@ if ($videoFiles.Count -gt 0) {
 
         if ($AudioCodec -in 'FLAC', 'PCM' -and $hasMovieConverter) {
             # Intermediate stitch file in RAMDISK/TEMP directory
-            $tempStitch = [System.IO.Path]::Combine($workingTempDir, "theta_stitch_${baseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
-            $tempWav = [System.IO.Path]::Combine($workingTempDir, "theta_audio_${baseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
-            $tempMov = [System.IO.Path]::Combine($workingTempDir, "theta_mov_${baseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
+            $tempStitch = [System.IO.Path]::Combine($workingTempDir, "theta_stitch_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
+            $tempWav = [System.IO.Path]::Combine($workingTempDir, "theta_audio_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
+            $tempMov = [System.IO.Path]::Combine($workingTempDir, "theta_mov_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
 
             Write-Host "  (1/3) 公式天頂補正スティッチ実行中 (DualfishBlender)..." -ForegroundColor Yellow
             $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$tempStitch`""
@@ -583,14 +581,12 @@ if ($imageFiles.Count -gt 0) {
         $imgIdx++
         $srcItem = Get-Item $imgFile
         $dir = if ($OutputDir) { $OutputDir } else { $srcItem.DirectoryName }
-        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name)
+        $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace '(_er|_st|_corrected|_stitched)$', ''
         $ext = [System.IO.Path]::GetExtension($srcItem.Name)
         
-        $dstFileName = "$baseName$ext"
+        # Official naming rule: Stitched/stabilized images get "_st" suffix (e.g. R0010390_st.jpg)
+        $dstFileName = "${rawBaseName}_st$ext"
         $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
-        if ($dstFile -eq $srcItem.FullName) {
-            $dstFile = [System.IO.Path]::Combine($dir, "${baseName}_stitched$ext")
-        }
 
         $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
         $targetDt = $trueTimeInfo.DateTime

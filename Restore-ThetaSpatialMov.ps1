@@ -6,7 +6,7 @@
     MP4やFLAC等の非対応形式で変換してしまったRICOH THETA動画や未加工動画（*.MP4）から、
     公式エンジン（DualfishBlender + RICOH THETA Movie Converter）を用いて、
     YouTube / Google / Meta Quest 等で100%空間音声として自動認識される公式標準 MOV (PCM 4ch + SA3D内蔵) ファイルを一括生成・復元します。
-    出力ファイル名は公式 Movie Converter と完全に同一の命名規則（例: R0010390.MP4 -> R0010390.mov）を採用しています。
+    出力ファイル名は公式アプリと完全に同一の命名規則（例: R0010390.MP4 -> R0010390_er.mov）を採用しています。
     RAMDISK（R:\ 等）の自動検出と中間作業領域の完全RAM化、GoogleフォトJSONやEXIFからの撮影日時自動復元に対応しています。
 
 .PARAMETER Path
@@ -127,7 +127,7 @@ function Get-MediaTrueTimestamp {
     $fileItem = Get-Item $FilePath
     $dir = $fileItem.DirectoryName
     $name = $fileItem.Name
-    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name).Replace('_corrected', '').Replace('_stitched', '')
+    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace '(_er|_st|_corrected|_stitched)$', ''
 
     $jsonCandidates = @(
         (Join-Path $dir "$name.json"),
@@ -254,10 +254,10 @@ foreach ($srcFile in $inputFiles) {
     $idx++
     $srcItem = Get-Item $srcFile
     $dir = $srcItem.DirectoryName
-    $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name).Replace('_corrected', '').Replace('_stitched', '')
+    $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace '(_er|_st|_corrected|_stitched)$', ''
     
-    # Official naming rule: R0010390.MP4 -> R0010390.mov
-    $dstFile = [System.IO.Path]::Combine($dir, "$rawBaseName.mov")
+    # Official naming rule: R0010390.MP4 -> R0010390_er.mov
+    $dstFile = [System.IO.Path]::Combine($dir, "${rawBaseName}_er.mov")
 
     # Find raw THETA MP4 file if input is already converted MP4
     $rawCandidates = @(
