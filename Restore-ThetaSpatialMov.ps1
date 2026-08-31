@@ -1,11 +1,12 @@
 ﻿<#
 .SYNOPSIS
-    変換済み動画または未加工動画から、YouTube/VR空間音声(SA3D内蔵)完全対応のMOV形式へ復元・一括再変換します。
+    変換済み動画または未加工動画から、YouTube/VR空間音声(SA3D内蔵)完全対応のMOV形式へ復元・nセッション並列一括再変換します。
 
 .DESCRIPTION
     MP4やFLAC等の非対応形式で変換してしまったRICOH THETA動画や未加工動画（*.MP4）から、
     公式エンジン（DualfishBlender + RICOH THETA Movie Converter）を用いて、
     YouTube / Google / Meta Quest 等で100%空間音声として自動認識される公式標準 MOV (PCM 4ch + SA3D内蔵) ファイルを一括生成・復元します。
+    GPU性能を最大限に引き出すため、デフォルト2セッション（-Threads n で変更可能）のマルチスレッド並列一括処理に対応しています。
     また、AndroidやGoogleフォトで発生するタイムゾーン（UTC/JST +9時間）計算ズレを解消するため、
     QuickTimeタグ（UTC）およびKeys:CreationDate（タイムゾーン付きローカル日時）を完全自動同期します。
     
@@ -23,6 +24,9 @@
 .PARAMETER Mode
     スタビライズ・方位固定モード（Spatial: 空間方位固定 / Camera: カメラ正面追従 / Lock: 方位ロック / ImageBlur: 手ブレ補正ON）。
 
+.PARAMETER Threads
+    並列実行セッション数（デフォルト: 2）。
+
 .PARAMETER TempDir
     中間ファイル作成用の一時ディレクトリ（RAMDISKなど。省略時は R:\ ドライブが存在すれば自動使用）。
 
@@ -36,7 +40,7 @@
     .\Restore-ThetaSpatialMov.ps1 -Path .\R0010390.MP4
 
 .EXAMPLE
-    .\Restore-ThetaSpatialMov.ps1 *.MP4 -Mode Spatial -NonInteractive
+    .\Restore-ThetaSpatialMov.ps1 *.MP4 -Threads 4 -NonInteractive
 
 .EXAMPLE
     .\Restore-ThetaSpatialMov.ps1 -h
@@ -49,6 +53,8 @@ param (
 
     [ValidateSet('Spatial', 'Camera', 'Lock', 'ImageBlur')]
     [string]$Mode = 'Spatial',
+
+    [int]$Threads = 2,
 
     [string]$TempDir,
 
@@ -127,134 +133,6 @@ if (-not $hasMovieConverter) {
 }
 #endregion
 
-#region Timestamp Extraction Helper
-function Get-MediaTrueTimestamp {
-    param (
-        [string]$FilePath
-    )
-    $fileItem = Get-Item $FilePath
-    $dir = $fileItem.DirectoryName
-    $name = $fileItem.Name
-    $cleanRegex = '(_er|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
-    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace $cleanRegex, ''
-
-    $jsonCandidates = @(
-        (Join-Path $dir "$name.json"),
-        (Join-Path $dir "$nameWithoutExt.MP4.json"),
-        (Join-Path $dir "$nameWithoutExt.json")
-    )
-    foreach ($jc in $jsonCandidates) {
-        if (Test-Path $jc) {
-            try {
-                $jsonContent = Get-Content -Path $jc -Raw -Encoding UTF8 | ConvertFrom-Json
-                if ($jsonContent.photoTakenTime -and $jsonContent.photoTakenTime.timestamp) {
-                    $tsLong = [int64]$jsonContent.photoTakenTime.timestamp
-                    if ($tsLong -gt 0) {
-                        $dt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
-                        return @{ DateTime = $dt; Source = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))" }
-                    }
-                }
-                if ($jsonContent.creationTime -and $jsonContent.creationTime.timestamp) {
-                    $tsLong = [int64]$jsonContent.creationTime.timestamp
-                    if ($tsLong -gt 0) {
-                        $dt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
-                        return @{ DateTime = $dt; Source = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))" }
-                    }
-                }
-            } catch { }
-        }
-    }
-
-    try {
-        $exifDate = (exiftool -d "%Y:%m:%d %H:%M:%S" -s3 -DateTimeOriginal -CreateDate -CreationDate -TrackCreateDate "$FilePath" 2>$null | Where-Object { $_ -match "^\d{4}:\d{2}:\d{2}" } | Select-Object -First 1)
-        if ($exifDate -and ($exifDate -match "^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})")) {
-            $parsedDt = [datetime]::ParseExact($exifDate.Trim(), "yyyy:MM:dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
-            return @{ DateTime = $parsedDt; Source = "InternalMetadata (EXIF/QuickTime)" }
-        }
-    } catch { }
-
-    return @{ DateTime = $fileItem.LastWriteTime; Source = "FileSystem" }
-}
-#endregion
-
-#region Accurate Timestamp Injector
-function Set-AccurateMediaTimestamp {
-    param (
-        [string]$FilePath,
-        [datetime]$TargetDateTime
-    )
-    $utcDt = $TargetDateTime.ToUniversalTime()
-    $dtUtcStr = $utcDt.ToString("yyyy:MM:dd HH:mm:ss")
-    $dtIsoLocalStr = $TargetDateTime.ToString("yyyy-MM-ddTHH:mm:sszzz")
-
-    exiftool -overwrite_original `
-        "-QuickTime:CreateDate=$dtUtcStr" `
-        "-QuickTime:ModifyDate=$dtUtcStr" `
-        "-QuickTime:TrackCreateDate=$dtUtcStr" `
-        "-QuickTime:TrackModifyDate=$dtUtcStr" `
-        "-QuickTime:MediaCreateDate=$dtUtcStr" `
-        "-QuickTime:MediaModifyDate=$dtUtcStr" `
-        "-Keys:CreationDate=$dtIsoLocalStr" `
-        "-UserData:DateTimeOriginal=$dtIsoLocalStr" `
-        "-XMP:DateTimeOriginal=$dtIsoLocalStr" `
-        "-XMP:CreateDate=$dtIsoLocalStr" `
-        "-XMP:ModifyDate=$dtIsoLocalStr" `
-        "$FilePath" *>$null
-
-    $dstItem = Get-Item $FilePath
-    $dstItem.CreationTime = $TargetDateTime
-    $dstItem.LastWriteTime = $TargetDateTime
-    $dstItem.LastAccessTime = $TargetDateTime
-}
-#endregion
-
-#region Official Movie Converter Invoker
-function Invoke-OfficialConvert {
-    param (
-        [string]$McDir,
-        [string]$StitchedMp4Path,
-        [string]$OutWav,
-        [string]$OutMov,
-        [string]$WorkDir
-    )
-    $tempRunner = [System.IO.Path]::Combine($WorkDir, "theta_runner_$([System.Guid]::NewGuid().ToString('N')).ps1")
-    $dllPathEscaped = [System.IO.Path]::Combine($McDir, "Mp4ConverterLib.dll").Replace('\', '\\')
-    $mcDirEscaped = $McDir.Replace('\', '\\')
-    $stitchedEscaped = $StitchedMp4Path.Replace('\', '\\')
-    $wavEscaped = $OutWav.Replace('\', '\\')
-    $movEscaped = $OutMov.Replace('\', '\\')
-
-    $lines = @(
-        'Add-Type -TypeDefinition @"',
-        'using System;',
-        'using System.Runtime.InteropServices;',
-        'public class NativeMp4Converter {',
-        "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"InitializeFfmpeg`", CallingConvention = CallingConvention.Cdecl)]",
-        '    public static extern void InitializeFfmpeg();',
-        "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"Convert`", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]",
-        '    public static extern int Convert(string mp4Name, string wavName, string movName);',
-        '}',
-        '"@',
-        "[System.IO.Directory]::SetCurrentDirectory('$mcDirEscaped')",
-        '[NativeMp4Converter]::InitializeFfmpeg()',
-        "`$ret = [NativeMp4Converter]::Convert('$stitchedEscaped', '$wavEscaped', '$movEscaped')",
-        'exit `$ret'
-    )
-
-    $utf8WithBom = [System.Text.UTF8Encoding]::new($true)
-    [System.IO.File]::WriteAllLines($tempRunner, $lines, $utf8WithBom)
-
-    $x86PowerShell = Join-Path $env:SystemRoot "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
-    if (-not (Test-Path $x86PowerShell)) { $x86PowerShell = "powershell.exe" }
-
-    & "$x86PowerShell" -NoProfile -ExecutionPolicy Bypass -File "$tempRunner" *>$null
-    $exitCode = $LASTEXITCODE
-
-    Remove-Item $tempRunner -Force -ErrorAction SilentlyContinue
-    return $exitCode
-}
-#endregion
-
 #region Collect Input Files
 $inputFiles = [System.Collections.Generic.List[string]]::new()
 if ($Path) {
@@ -276,6 +154,8 @@ if ($inputFiles.Count -eq 0) {
     Get-Help -Name $PSCommandPath -Full
     exit 0
 }
+
+if ($Threads -lt 1) { $Threads = 2 }
 #endregion
 
 #region Build Options
@@ -295,28 +175,27 @@ $modeSuffix = switch ($Mode) {
 }
 #endregion
 
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "   RICOH THETA 空間音声MOV (SA3D内蔵) 復元・再変換ツール   " -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "対象動画ファイル数 : $($inputFiles.Count) 件" -ForegroundColor White
-Write-Host "作業領域 (TEMP)    : $tempDisplayStr" -ForegroundColor Green
-Write-Host "スタビライズモード : $Mode ($modeSuffix)" -ForegroundColor Green
-Write-Host "出力形式           : MOV (.mov) [YouTube / VR 空間音声完全互換]" -ForegroundColor Green
-Write-Host "空間音声エンジン   : RICOH THETA Movie Converter 公式純正" -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Cyan
+#region Worker Script Block
+$restoreWorkerScriptBlock = {
+    param (
+        [string]$SrcFile,
+        [int]$VideoIndex,
+        [int]$TotalVideos,
+        [string]$StabilizeOpt,
+        [string]$ModeSuffix,
+        [string]$WorkingTempDir,
+        [string]$BlenderPath,
+        [string]$ResourcesPath,
+        [string]$MovieConverterDir
+    )
 
-$idx = 0
-foreach ($srcFile in $inputFiles) {
-    $idx++
-    $srcItem = Get-Item $srcFile
+    $srcItem = Get-Item $SrcFile
     $dir = $srcItem.DirectoryName
     $cleanRegex = '(_er|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
     $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
     
-    # Feature distinct naming rule: R0010390.MP4 -> R0010390_er_spatial.mov
-    $dstFile = [System.IO.Path]::Combine($dir, "$rawBaseName$modeSuffix.mov")
+    $dstFile = [System.IO.Path]::Combine($dir, "$rawBaseName$ModeSuffix.mov")
 
-    # Find raw THETA MP4 file if input is already converted MP4
     $rawCandidates = @(
         (Join-Path $dir "$rawBaseName.MP4"),
         (Join-Path $dir "$rawBaseName.mp4"),
@@ -330,56 +209,203 @@ foreach ($srcFile in $inputFiles) {
         }
     }
 
-    $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
-    $targetDt = $trueTimeInfo.DateTime
-    $timeSrcName = $trueTimeInfo.Source
+    # Timestamp extraction
+    $name = $srcItem.Name
+    $jsonCandidates = @(
+        (Join-Path $dir "$name.json"),
+        (Join-Path $dir "$rawBaseName.MP4.json"),
+        (Join-Path $dir "$rawBaseName.json")
+    )
+    $targetDt = $srcItem.LastWriteTime
 
-    Write-Host "`n[動画 $idx/$($inputFiles.Count)] 復元処理中: $($srcItem.Name)" -ForegroundColor Cyan
-    Write-Host "  元動画ソース: $(if ($rawFile) { [System.IO.Path]::GetFileName($rawFile) } else { '元動画未検出' })" -ForegroundColor Gray
-    Write-Host "  撮影日時検出: $($targetDt.ToString('yyyy-MM-dd HH:mm:ss')) (ソース: $timeSrcName)" -ForegroundColor Green
-    Write-Host "  出力先 MOV  : $dstFile" -ForegroundColor Gray
-
-    if (Test-Path $dstFile) {
-        Remove-Item $dstFile -Force
+    foreach ($jc in $jsonCandidates) {
+        if (Test-Path $jc) {
+            try {
+                $jsonContent = Get-Content -Path $jc -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($jsonContent.photoTakenTime -and $jsonContent.photoTakenTime.timestamp) {
+                    $tsLong = [int64]$jsonContent.photoTakenTime.timestamp
+                    if ($tsLong -gt 0) {
+                        $targetDt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
+                        break
+                    }
+                }
+            } catch { }
+        }
     }
 
-    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    if (Test-Path $dstFile) { Remove-Item $dstFile -Force }
 
-    $tempStitch = [System.IO.Path]::Combine($workingTempDir, "theta_stitch_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
-    $tempWav = [System.IO.Path]::Combine($workingTempDir, "theta_audio_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
-    $tempMov = [System.IO.Path]::Combine($workingTempDir, "theta_mov_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $logPrefix = "[動画 $VideoIndex/$TotalVideos] $($srcItem.Name)"
 
-    Write-Host "  (1/2) 公式天頂補正スティッチ実行中 (DualfishBlender)..." -ForegroundColor Yellow
-    $arguments = "$stabilizeOpt `"$rawFile`" `"$tempStitch`""
+    $tempStitch = [System.IO.Path]::Combine($WorkingTempDir, "theta_stitch_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
+    $tempWav = [System.IO.Path]::Combine($WorkingTempDir, "theta_audio_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
+    $tempMov = [System.IO.Path]::Combine($WorkingTempDir, "theta_mov_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
+
+    $arguments = "$StabilizeOpt `"$rawFile`" `"$tempStitch`""
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-    $pinfo.FileName = $blenderPath
+    $pinfo.FileName = $BlenderPath
     $pinfo.Arguments = $arguments
-    $pinfo.WorkingDirectory = $resourcesPath
+    $pinfo.WorkingDirectory = $ResourcesPath
     $pinfo.UseShellExecute = $false
     $procBlender = [System.Diagnostics.Process]::Start($pinfo)
     $procBlender.WaitForExit()
 
     if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
-        Write-Host "  (2/2) 公式4ch空間音声MOV生成中 (RICOH THETA Movie Converter)..." -ForegroundColor Yellow
-        $mcExit = Invoke-OfficialConvert -McDir $movieConverterDir -StitchedMp4Path $tempStitch -OutWav $tempWav -OutMov $tempMov -WorkDir $workingTempDir
+        $tempRunner = [System.IO.Path]::Combine($WorkingTempDir, "theta_runner_$([System.Guid]::NewGuid().ToString('N')).ps1")
+        $dllPathEscaped = [System.IO.Path]::Combine($MovieConverterDir, "Mp4ConverterLib.dll").Replace('\', '\\')
+        $mcDirEscaped = $MovieConverterDir.Replace('\', '\\')
+        $stitchedEscaped = $tempStitch.Replace('\', '\\')
+        $wavEscaped = $tempWav.Replace('\', '\\')
+        $movEscaped = $tempMov.Replace('\', '\\')
+
+        $lines = @(
+            'Add-Type -TypeDefinition @"',
+            'using System;',
+            'using System.Runtime.InteropServices;',
+            'public class NativeMp4Converter {',
+            "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"InitializeFfmpeg`", CallingConvention = CallingConvention.Cdecl)]",
+            '    public static extern void InitializeFfmpeg();',
+            "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"Convert`", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]",
+            '    public static extern int Convert(string mp4Name, string wavName, string movName);',
+            '}',
+            '"@',
+            "[System.IO.Directory]::SetCurrentDirectory('$mcDirEscaped')",
+            '[NativeMp4Converter]::InitializeFfmpeg()',
+            "`$ret = [NativeMp4Converter]::Convert('$stitchedEscaped', '$wavEscaped', '$movEscaped')",
+            'exit `$ret'
+        )
+
+        $utf8WithBom = [System.Text.UTF8Encoding]::new($true)
+        [System.IO.File]::WriteAllLines($tempRunner, $lines, $utf8WithBom)
+
+        $x86PowerShell = Join-Path $env:SystemRoot "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+        if (-not (Test-Path $x86PowerShell)) { $x86PowerShell = "powershell.exe" }
+        & "$x86PowerShell" -NoProfile -ExecutionPolicy Bypass -File "$tempRunner" *>$null
+        Remove-Item $tempRunner -Force -ErrorAction SilentlyContinue
 
         if ((Test-Path $tempMov) -and (Get-Item $tempMov).Length -gt 0) {
             Move-Item $tempMov $dstFile -Force
 
-            Set-AccurateMediaTimestamp -FilePath $dstFile -TargetDateTime $targetDt
-            $stopwatch.Stop()
-            Write-Host "  [OK] 復元完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムゾーン完全同期(SA3D内蔵) MOV生成完了" -ForegroundColor Green
+            $utcDt = $targetDt.ToUniversalTime()
+            $dtUtcStr = $utcDt.ToString("yyyy:MM:dd HH:mm:ss")
+            $dtIsoLocalStr = $targetDt.ToString("yyyy-MM-ddTHH:mm:sszzz")
+            exiftool -overwrite_original `
+                "-QuickTime:CreateDate=$dtUtcStr" `
+                "-QuickTime:ModifyDate=$dtUtcStr" `
+                "-QuickTime:TrackCreateDate=$dtUtcStr" `
+                "-QuickTime:TrackModifyDate=$dtUtcStr" `
+                "-QuickTime:MediaCreateDate=$dtUtcStr" `
+                "-QuickTime:MediaModifyDate=$dtUtcStr" `
+                "-Keys:CreationDate=$dtIsoLocalStr" `
+                "-UserData:DateTimeOriginal=$dtIsoLocalStr" `
+                "-XMP:DateTimeOriginal=$dtIsoLocalStr" `
+                "-XMP:CreateDate=$dtIsoLocalStr" `
+                "-XMP:ModifyDate=$dtIsoLocalStr" `
+                "$dstFile" *>$null
+
+            $dstItem = Get-Item $dstFile
+            $dstItem.CreationTime = $targetDt
+            $dstItem.LastWriteTime = $targetDt
+            $dstItem.LastAccessTime = $targetDt
+
+            $sw.Stop()
+            Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempWav -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
+
+            return [PSCustomObject]@{
+                Success = $true
+                Message = "$logPrefix 復元完了 ($([Math]::Round($sw.Elapsed.TotalSeconds, 1))秒) -> $([System.IO.Path]::GetFileName($dstFile))"
+            }
         } else {
-            Write-Error "  [NG] Movie Converter による空間音声MOV生成に失敗しました。"
+            Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempWav -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
+            return [PSCustomObject]@{
+                Success = $false
+                Message = "$logPrefix エラー (Movie Converter 失敗)"
+            }
         }
     } else {
-        Write-Error "  [NG] DualfishBlender による映像スティッチに失敗しました (ExitCode: $($procBlender.ExitCode))"
+        Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
+        return [PSCustomObject]@{
+            Success = $false
+            Message = "$logPrefix エラー (DualfishBlender スティッチ失敗)"
+        }
     }
-
-    Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
-    Remove-Item $tempWav -Force -ErrorAction SilentlyContinue
-    Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
 }
+#endregion
+
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "   RICOH THETA 空間音声MOV (SA3D内蔵) 復元・再変換ツール   " -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "対象動画ファイル数 : $($inputFiles.Count) 件" -ForegroundColor White
+Write-Host "作業領域 (TEMP)    : $tempDisplayStr" -ForegroundColor Green
+Write-Host "スタビライズモード : $Mode ($modeSuffix)" -ForegroundColor Green
+Write-Host "並列セッション数   : $Threads 並列" -ForegroundColor Green
+Write-Host "出力形式           : MOV (.mov) [YouTube / VR 空間音声完全互換]" -ForegroundColor Green
+Write-Host "空間音声エンジン   : RICOH THETA Movie Converter 公式純正" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Cyan
+
+$totalWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $Threads)
+$pool.Open()
+
+$runspaces = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+
+$idx = 0
+foreach ($srcFile in $inputFiles) {
+    $idx++
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.RunspacePool = $pool
+    
+    [void]$ps.AddScript($restoreWorkerScriptBlock).AddParameters(@{
+        SrcFile           = $srcFile
+        VideoIndex        = $idx
+        TotalVideos       = $inputFiles.Count
+        StabilizeOpt      = $stabilizeOpt
+        ModeSuffix        = $modeSuffix
+        WorkingTempDir    = $workingTempDir
+        BlenderPath       = $blenderPath
+        ResourcesPath     = $resourcesPath
+        MovieConverterDir = $movieConverterDir
+    })
+
+    $asyncResult = $ps.BeginInvoke()
+    [void]$runspaces.Add([PSCustomObject]@{
+        PowerShell  = $ps
+        AsyncResult = $asyncResult
+        FileName    = [System.IO.Path]::GetFileName($srcFile)
+        Index       = $idx
+    })
+    Write-Host "  [開始 $idx/$($inputFiles.Count)] $([System.IO.Path]::GetFileName($srcFile))" -ForegroundColor Gray
+}
+
+while ($runspaces.Count -gt 0) {
+    for ($i = $runspaces.Count - 1; $i -ge 0; $i--) {
+        $r = $runspaces[$i]
+        if ($r.AsyncResult.IsCompleted) {
+            try {
+                $output = $r.PowerShell.EndInvoke($r.AsyncResult)
+                if ($output.Success) {
+                    Write-Host "  [OK] $($output.Message)" -ForegroundColor Green
+                } else {
+                    Write-Error "  [NG] $($output.Message)"
+                }
+            } catch {
+                Write-Error "  [NG] [動画 $($r.Index)] $($r.FileName) 例外エラー: $_"
+            } finally {
+                $r.PowerShell.Dispose()
+                $runspaces.RemoveAt($i)
+            }
+        }
+    }
+    Start-Sleep -Milliseconds 200
+}
+
+$pool.Close()
+$pool.Dispose()
 
 try {
     if (Test-Path $workingTempDir) {
@@ -388,6 +414,7 @@ try {
     }
 } catch { }
 
+$totalWatch.Stop()
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "すべての復元・再変換処理が完了しました ($($inputFiles.Count) 件)" -ForegroundColor Green
+Write-Host "すべての復元・再変換処理が完了しました ($($inputFiles.Count) 件, 総所要時間: $([Math]::Round($totalWatch.Elapsed.TotalSeconds, 1)) 秒)" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan

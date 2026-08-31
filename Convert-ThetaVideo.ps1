@@ -1,11 +1,12 @@
 ﻿<#
 .SYNOPSIS
-    RICOH THETAの未加工動画を対話型設定・正常な天頂補正・4ch空間音声(SA3D内蔵MOV/PCM)展開・任意方位固定で一括変換します。
+    RICOH THETAの未加工動画を対話型設定・正常な天頂補正・4ch空間音声(SA3D内蔵MOV/PCM)展開・任意方位固定・nセッション並列処理で一括変換します。
 
 .DESCRIPTION
     RICOH THETA公式エンジン（DualfishBlender.exe）および公式空間音声エンジン（RICOH THETA Movie Converter）の
     純正パイプラインを100%そのまま使用し、YouTubeやVRプレイヤー・VLC・Googleフォトで確実に360度空間映像・空間音声（Ambisonics SA3D）として
     認識される高品質なEquirectangular動画を生成します。
+    GPU性能を最大限に引き出すため、デフォルト2セッション（-Threads n で変更可能）のマルチスレッド並列一括処理に対応しています。
     正面回転オフセット（-YawOffset）やタイムコード指定時にも、映像の回転に合わせて4ch空間音声（Ambisonics）の音響定位も数学的回転行列で完全連動回転させ、
     さらにGoogle公式SpatialMedia（Spherical Video + SA3D Audio）メタデータを完全自動注入します。
     また、AndroidやGoogleフォトで発生するタイムゾーン（UTC/JST +9時間）計算ズレを解消するため、
@@ -36,6 +37,9 @@
 .PARAMETER AudioCodec
     音声コーデック（PCM: YouTube/VR空間音声公式標準 / FLAC: 非推奨・ローカル保存用 / Stereo: 通常ステレオ）。
 
+.PARAMETER Threads
+    並列実行セッション数（デフォルト: 2）。
+
 .PARAMETER YawOffset
     動画全体の正面方向（ヨー角）オフセット（度、例: 90, -45, 180）。
 
@@ -58,7 +62,7 @@
     .\Convert-ThetaVideo.ps1 -Path .\R0010414.MP4
 
 .EXAMPLE
-    .\Convert-ThetaVideo.ps1 *.MP4 -Mode Spatial -Container MOV -AudioCodec PCM -NonInteractive
+    .\Convert-ThetaVideo.ps1 *.MP4 -Threads 4 -NonInteractive
 
 .EXAMPLE
     .\Convert-ThetaVideo.ps1 *.MP4 -CenterTime "00:00:15" -NonInteractive
@@ -80,6 +84,8 @@ param (
 
     [ValidateSet('PCM', 'FLAC', 'Stereo')]
     [string]$AudioCodec,
+
+    [int]$Threads = 2,
 
     [double]$YawOffset = 0.0,
 
@@ -126,7 +132,6 @@ if (-not (Test-Path $workingTempDir)) {
     New-Item -Path $workingTempDir -ItemType Directory -Force | Out-Null
 }
 
-# Redirect process-level TEMP and TMP so DualfishBlender, ffmpeg, and Movie Converter use RAMDISK
 $env:TEMP = $workingTempDir
 $env:TMP = $workingTempDir
 
@@ -145,7 +150,7 @@ $tempDisplayStr = "$workingTempDir $(if ($isRamDisk) { '(RAMDISK 検出・SSD書
 #region Engine Discovery and Environment Detection
 $scriptDir = Split-Path -Parent $PSCommandPath
 
-# 1. DualfishBlender path (Prefer local embedded tools, fallback to installed AppData)
+# 1. DualfishBlender path
 $localBlender = Join-Path $scriptDir "tools\dualfishblender\DualfishBlender.exe"
 $appDataBlender = Join-Path $env:LOCALAPPDATA "Programs\RicohTheta\resources\tools\dualfishblender\win\DualfishBlender.exe"
 
@@ -160,14 +165,14 @@ if (Test-Path $localBlender) {
     exit 1
 }
 
-# 2. RICOH THETA Movie Converter path (Official spatial audio engine)
+# 2. RICOH THETA Movie Converter path
 $movieConverterDir = Join-Path $scriptDir "tools\ricoh_movie_converter"
 $hasMovieConverter = (Test-Path (Join-Path $movieConverterDir "RICOH THETA Movie Converter.exe")) -and (Test-Path (Join-Path $movieConverterDir "Mp4ConverterLib.dll"))
 
 # 3. Google SpatialMedia tools path
 $spatialMediaDir = Join-Path $scriptDir "tools\spatialmedia"
 
-# 4. Detect all GPUs on the system (dGPU + iGPU)
+# 4. Detect all GPUs on the system
 $gpuList = [System.Collections.Generic.List[string]]::new()
 try {
     $controllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
@@ -199,156 +204,6 @@ try {
 }
 
 $gpuDisplayStr = if ($gpuList.Count -gt 0) { $gpuList -join " / " } else { $detectedGpu }
-#endregion
-
-#region Timestamp Extraction Helper (Google Photos JSON & Metadata)
-function Get-MediaTrueTimestamp {
-    param (
-        [string]$FilePath
-    )
-    $fileItem = Get-Item $FilePath
-    $dir = $fileItem.DirectoryName
-    $name = $fileItem.Name
-    $cleanRegex = '(_er|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
-    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace $cleanRegex, ''
-
-    # 1. Search Google Photos JSON files: <name>.json, <name>.MP4.json, <nameWithoutExt>.json
-    $jsonCandidates = @(
-        (Join-Path $dir "$name.json"),
-        (Join-Path $dir "$nameWithoutExt.json"),
-        (Join-Path $dir "$nameWithoutExt.MP4.json"),
-        (Join-Path $dir "$nameWithoutExt.MOV.json")
-    )
-    foreach ($jc in $jsonCandidates) {
-        if (Test-Path $jc) {
-            try {
-                $jsonContent = Get-Content -Path $jc -Raw -Encoding UTF8 | ConvertFrom-Json
-                if ($jsonContent.photoTakenTime -and $jsonContent.photoTakenTime.timestamp) {
-                    $tsLong = [int64]$jsonContent.photoTakenTime.timestamp
-                    if ($tsLong -gt 0) {
-                        $dt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
-                        return @{ DateTime = $dt; Source = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))" }
-                    }
-                }
-                if ($jsonContent.creationTime -and $jsonContent.creationTime.timestamp) {
-                    $tsLong = [int64]$jsonContent.creationTime.timestamp
-                    if ($tsLong -gt 0) {
-                        $dt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
-                        return @{ DateTime = $dt; Source = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))" }
-                    }
-                }
-            } catch { }
-        }
-    }
-
-    # 2. Search internal EXIF / QuickTime CreateDate via exiftool
-    try {
-        $exifDate = (exiftool -d "%Y:%m:%d %H:%M:%S" -s3 -DateTimeOriginal -CreateDate -CreationDate -TrackCreateDate "$FilePath" 2>$null | Where-Object { $_ -match "^\d{4}:\d{2}:\d{2}" } | Select-Object -First 1)
-        if ($exifDate -and ($exifDate -match "^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})")) {
-            $parsedDt = [datetime]::ParseExact($exifDate.Trim(), "yyyy:MM:dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
-            return @{ DateTime = $parsedDt; Source = "InternalMetadata (EXIF/QuickTime)" }
-        }
-    } catch { }
-
-    # 3. Fallback to file system LastWriteTime
-    return @{ DateTime = $fileItem.LastWriteTime; Source = "FileSystem" }
-}
-#endregion
-
-#region Ambisonics Rotation Filter Helper (Mathematical Yaw Rotation for 4ch B-format)
-function Get-AmbisonicsRotationFilter {
-    param (
-        [double]$YawDeg
-    )
-    $rad = $YawDeg * [Math]::PI / 180.0
-    $cos = [Math]::Cos($rad)
-    $sin = [Math]::Sin($rad)
-    
-    # AmbiX ACN Channel Mapping:
-    # c0: W (Omnidirectional / unchanged)
-    # c1: Y' = Y*cos(rad) + X*sin(rad)
-    # c2: Z (Vertical / unchanged)
-    # c3: X' = -Y*sin(rad) + X*cos(rad)
-    $cosStr = $cos.ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
-    $sinStr = $sin.ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
-    $negSinStr = (-$sin).ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
-
-    return "pan=4c|c0=c0|c1=${cosStr}*c1+${sinStr}*c3|c2=c2|c3=${negSinStr}*c1+${cosStr}*c3"
-}
-#endregion
-
-#region Spherical 360 Video & SA3D Spatial Audio Metadata Injector (Google SpatialMedia)
-function Inject-SphericalAndSpatialAudioMetadata {
-    param (
-        [string]$TargetMoviePath,
-        [string]$ToolsDir,
-        [string]$WorkDir,
-        [bool]$HasSpatialAudio
-    )
-    $audioArg = if ($HasSpatialAudio) { "metadata.audio = metadata_utils.get_spatial_audio_metadata(ambisonic_order=1, head_locked_stereo=False)" } else { "" }
-    
-    $pyScript = @"
-import sys, os, shutil
-tools_dir = r'$ToolsDir'
-target = r'$TargetMoviePath'
-work_dir = r'$WorkDir'
-
-sys.path.insert(0, tools_dir)
-try:
-    from spatialmedia import metadata_utils
-    metadata = metadata_utils.Metadata()
-    metadata.video = metadata_utils.generate_spherical_xml()
-    $audioArg
-    temp_out = os.path.join(work_dir, 'theta_inj_' + os.path.basename(target))
-    metadata_utils.inject_metadata(target, temp_out, metadata, lambda s: None)
-    if os.path.exists(temp_out) and os.path.getsize(temp_out) > 0:
-        shutil.move(temp_out, target)
-        sys.exit(0)
-    else:
-        sys.exit(1)
-except Exception as e:
-    sys.exit(2)
-"@
-    $tempPy = [System.IO.Path]::Combine($WorkDir, "theta_inject_$([System.Guid]::NewGuid().ToString('N')).py")
-    [System.IO.File]::WriteAllText($tempPy, $pyScript, [System.Text.Encoding]::UTF8)
-    
-    python "$tempPy" *>$null
-    $exitCode = $LASTEXITCODE
-    Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
-    return ($exitCode -eq 0)
-}
-#endregion
-
-#region Accurate Timestamp Injector (UTC & Local TimeZone Awareness for Android/Google Photos)
-function Set-AccurateMediaTimestamp {
-    param (
-        [string]$FilePath,
-        [datetime]$TargetDateTime
-    )
-    $utcDt = $TargetDateTime.ToUniversalTime()
-    $dtUtcStr = $utcDt.ToString("yyyy:MM:dd HH:mm:ss")
-    $dtIsoLocalStr = $TargetDateTime.ToString("yyyy-MM-ddTHH:mm:sszzz")
-    $dtLocalStr = $TargetDateTime.ToString("yyyy:MM:dd HH:mm:ss")
-
-    exiftool -overwrite_original `
-        "-QuickTime:CreateDate=$dtUtcStr" `
-        "-QuickTime:ModifyDate=$dtUtcStr" `
-        "-QuickTime:TrackCreateDate=$dtUtcStr" `
-        "-QuickTime:TrackModifyDate=$dtUtcStr" `
-        "-QuickTime:MediaCreateDate=$dtUtcStr" `
-        "-QuickTime:MediaModifyDate=$dtUtcStr" `
-        "-Keys:CreationDate=$dtIsoLocalStr" `
-        "-UserData:DateTimeOriginal=$dtIsoLocalStr" `
-        "-XMP:DateTimeOriginal=$dtIsoLocalStr" `
-        "-XMP:CreateDate=$dtIsoLocalStr" `
-        "-XMP:ModifyDate=$dtIsoLocalStr" `
-        "$FilePath" *>$null
-
-    $dstItem = Get-Item $FilePath
-    $dstItem.CreationTime = $TargetDateTime
-    $dstItem.LastWriteTime = $TargetDateTime
-    $dstItem.LastAccessTime = $TargetDateTime
-}
 #endregion
 
 #region Collect Input Files
@@ -396,6 +251,7 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
     Write-Host "搭載GPU構成            : $gpuDisplayStr" -ForegroundColor Green
     Write-Host "映像スティッチエンジン : 内蔵 (DualfishBlender 公式純正)" -ForegroundColor Green
     Write-Host "空間音声エンジン       : $(if ($hasMovieConverter) { '内蔵 (RICOH THETA Movie Converter 公式純正)' } else { '未検出 (ステレオのみ)' })" -ForegroundColor Green
+    Write-Host "並列セッション数       : $Threads 並列" -ForegroundColor Green
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
 
     # 1. Mode selection
@@ -460,6 +316,16 @@ if (-not $NonInteractive -and $videoFiles.Count -gt 0 -and ([string]::IsNullOrWh
             $AudioCodec = 'Stereo'
         }
     }
+
+    # 5. Thread count selection
+    if ($videoFiles.Count -gt 1) {
+        Write-Host "`n[5] GPU並列処理セッション数 (任意):" -ForegroundColor Yellow
+        $thInput = Read-Host "並列セッション数 (デフォルト: 2)"
+        if (-not [string]::IsNullOrWhiteSpace($thInput) -and ($thInput.Trim() -match '^\d+$')) {
+            $Threads = [Math]::Max(1, [int]$thInput.Trim())
+        }
+    }
+
     Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
 }
 
@@ -469,174 +335,172 @@ if ([string]::IsNullOrWhiteSpace($Container)) { $Container = 'MOV' }
 if ([string]::IsNullOrWhiteSpace($AudioCodec)) {
     $AudioCodec = if ($hasMovieConverter) { 'PCM' } else { 'Stereo' }
 }
+if ($Threads -lt 1) { $Threads = 2 }
 #endregion
 
 #region Build DualfishBlender Command Options
 $optionList = [System.Collections.Generic.List[string]]::new()
-
-# Mode option (Official DualfishBlender stabilize flags)
 switch ($Mode) {
     'Spatial'   { $optionList.Add("-stabilize:-image") }
     'Camera'    { $optionList.Add("-stabilize:off") }
     'Lock'      { $optionList.Add("-stabilize:lock") }
     'ImageBlur' { $optionList.Add("-stabilize:image") }
 }
-
 $optionsStr = $optionList -join " "
 #endregion
 
-#region Output Suffix Builder Helper (Unique Suffix per Feature)
-function Get-OutputSuffix {
+#region Worker Script Definition (Parallel Multi-Session Execution)
+$workerScriptBlock = {
     param (
-        [string]$ProcessMode,
-        [double]$Yaw,
-        [string]$TimeCode
-    )
-    # Base mode tag
-    $modeTag = switch ($ProcessMode) {
-        'Spatial'   { "_er_spatial" }
-        'Camera'    { "_er_cam" }
-        'Lock'      { "_er_lock" }
-        'ImageBlur' { "_er" }       # Official standard
-        default     { "_er" }
-    }
-
-    # Optional yaw / timecode tag
-    $extraTag = ""
-    if ($TimeCode) {
-        $tcClean = $TimeCode -replace '[^0-9]', ''
-        $extraTag = "_tc$tcClean"
-    } elseif ($Yaw -ne 0.0) {
-        $extraTag = "_yaw$Yaw"
-    }
-
-    return "$modeTag$extraTag"
-}
-#endregion
-
-#region Official Spatial Audio Converter Helper (RICOH THETA Movie Converter Pipeline)
-function Invoke-ExtractSpatialWav {
-    param (
-        [string]$McDir,
-        [string]$StitchedMp4Path,
-        [string]$TempWav,
-        [string]$TempMov,
-        [string]$WorkDir
-    )
-    $tempRunner = [System.IO.Path]::Combine($WorkDir, "theta_runner_$([System.Guid]::NewGuid().ToString('N')).ps1")
-
-    $dllPathEscaped = [System.IO.Path]::Combine($McDir, "Mp4ConverterLib.dll").Replace('\', '\\')
-    $mcDirEscaped = $McDir.Replace('\', '\\')
-    $stitchedEscaped = $StitchedMp4Path.Replace('\', '\\')
-    $wavEscaped = $TempWav.Replace('\', '\\')
-    $movEscaped = $TempMov.Replace('\', '\\')
-
-    $lines = @(
-        'Add-Type -TypeDefinition @"',
-        'using System;',
-        'using System.Runtime.InteropServices;',
-        'public class NativeMp4Converter {',
-        "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"InitializeFfmpeg`", CallingConvention = CallingConvention.Cdecl)]",
-        '    public static extern void InitializeFfmpeg();',
-        "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"Convert`", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]",
-        '    public static extern int Convert(string mp4Name, string wavName, string movName);',
-        '}',
-        '"@',
-        "[System.IO.Directory]::SetCurrentDirectory('$mcDirEscaped')",
-        '[NativeMp4Converter]::InitializeFfmpeg()',
-        "`$ret = [NativeMp4Converter]::Convert('$stitchedEscaped', '$wavEscaped', '$movEscaped')",
-        'exit `$ret'
+        [string]$SrcFile,
+        [int]$VideoIndex,
+        [int]$TotalVideos,
+        [string]$Mode,
+        [string]$OptionsStr,
+        [string]$Container,
+        [string]$AudioCodec,
+        [double]$YawOffset,
+        [string]$CenterTime,
+        [string]$OutputDir,
+        [string]$WorkingTempDir,
+        [string]$BlenderPath,
+        [string]$ResourcesPath,
+        [string]$MovieConverterDir,
+        [bool]$HasMovieConverter,
+        [string]$ToolsDir
     )
 
-    $utf8WithBom = [System.Text.UTF8Encoding]::new($true)
-    [System.IO.File]::WriteAllLines($tempRunner, $lines, $utf8WithBom)
-
-    $x86PowerShell = Join-Path $env:SystemRoot "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
-    if (-not (Test-Path $x86PowerShell)) {
-        $x86PowerShell = "powershell.exe"
-    }
-
-    & "$x86PowerShell" -NoProfile -ExecutionPolicy Bypass -File "$tempRunner" *>$null
-    $exitCode = $LASTEXITCODE
-
-    Remove-Item $tempRunner -Force -ErrorAction SilentlyContinue
-    return $exitCode
-}
-#endregion
-
-#region Batch Execution - Videos
-Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "動画変換設定:" -ForegroundColor Green
-Write-Host "  - 一時作業領域 : $tempDisplayStr" -ForegroundColor White
-Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
-Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
-Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant())) $(if ($Container -eq 'MOV') { '[YouTube空間音声公式推奨 / SA3D内蔵]' })" -ForegroundColor White
-Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -eq 'PCM') { '(4ch 空間音声 Ambisonics / YouTube公式完全対応)' } elseif ($AudioCodec -eq 'FLAC') { '【スーパー非推奨 / YouTube空間音声非対応】' } else { '(通常ステレオ)' })" -ForegroundColor White
-Write-Host "============================================================" -ForegroundColor Cyan
-
-$vIdx = 0
-foreach ($srcFile in $videoFiles) {
-    $vIdx++
-    $srcItem = Get-Item $srcFile
+    $srcItem = Get-Item $SrcFile
     $dir = if ($OutputDir) { $OutputDir } else { $srcItem.DirectoryName }
     $cleanRegex = '(_er|_spatial|_cam|_lock|_yaw[0-9\-]+|_tc[0-9\-]+|_corrected|_stitched)+$'
     $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
     $ext = "." + $Container.ToLowerInvariant()
 
-    # Build feature-distinct suffix
-    $suffix = Get-OutputSuffix -ProcessMode $Mode -Yaw $YawOffset -TimeCode $CenterTime
-    $dstFileName = "$rawBaseName$suffix$ext"
-    $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
-
-    # Extract true creation timestamp (Google Photos JSON or internal metadata)
-    $trueTimeInfo = Get-MediaTrueTimestamp -FilePath $srcItem.FullName
-    $targetDt = $trueTimeInfo.DateTime
-    $timeSrcName = $trueTimeInfo.Source
-
-    Write-Host "`n[動画 $vIdx/$($videoFiles.Count)] 処理開始: $($srcItem.Name)" -ForegroundColor Cyan
-    Write-Host "  撮影日時検出: $($targetDt.ToString('yyyy-MM-dd HH:mm:ss')) (ソース: $timeSrcName)" -ForegroundColor Green
-    Write-Host "  最終出力先  : $dstFile" -ForegroundColor Gray
-
-    if (Test-Path $dstFile) {
-        Remove-Item $dstFile -Force
+    # Base mode tag
+    $modeTag = switch ($Mode) {
+        'Spatial'   { "_er_spatial" }
+        'Camera'    { "_er_cam" }
+        'Lock'      { "_er_lock" }
+        'ImageBlur' { "_er" }
+        default     { "_er" }
     }
 
-    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    # Optional yaw / timecode tag
+    $extraTag = ""
+    if ($CenterTime) {
+        $tcClean = $CenterTime -replace '[^0-9]', ''
+        $extraTag = "_tc$tcClean"
+    } elseif ($YawOffset -ne 0.0) {
+        $extraTag = "_yaw$YawOffset"
+    }
 
-    # Calculate final yaw offset (direct offset or from CenterTime)
+    $dstFileName = "$rawBaseName$modeTag$extraTag$ext"
+    $dstFile = [System.IO.Path]::Combine($dir, $dstFileName)
+
+    # 1. Extract true creation timestamp
+    $name = $srcItem.Name
+    $jsonCandidates = @(
+        (Join-Path $dir "$name.json"),
+        (Join-Path $dir "$rawBaseName.json"),
+        (Join-Path $dir "$rawBaseName.MP4.json"),
+        (Join-Path $dir "$rawBaseName.MOV.json")
+    )
+    $targetDt = $srcItem.LastWriteTime
+    $timeSrcName = "FileSystem"
+
+    foreach ($jc in $jsonCandidates) {
+        if (Test-Path $jc) {
+            try {
+                $jsonContent = Get-Content -Path $jc -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($jsonContent.photoTakenTime -and $jsonContent.photoTakenTime.timestamp) {
+                    $tsLong = [int64]$jsonContent.photoTakenTime.timestamp
+                    if ($tsLong -gt 0) {
+                        $targetDt = [System.DateTimeOffset]::FromUnixTimeSeconds($tsLong).LocalDateTime
+                        $timeSrcName = "GooglePhotosJSON ($([System.IO.Path]::GetFileName($jc)))"
+                        break
+                    }
+                }
+            } catch { }
+        }
+    }
+
+    if ($timeSrcName -eq "FileSystem") {
+        try {
+            $exifDate = (exiftool -d "%Y:%m:%d %H:%M:%S" -s3 -DateTimeOriginal -CreateDate -CreationDate -TrackCreateDate "$SrcFile" 2>$null | Where-Object { $_ -match "^\d{4}:\d{2}:\d{2}" } | Select-Object -First 1)
+            if ($exifDate -and ($exifDate -match "^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})")) {
+                $targetDt = [datetime]::ParseExact($exifDate.Trim(), "yyyy:MM:dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+                $timeSrcName = "InternalMetadata (EXIF/QuickTime)"
+            }
+        } catch { }
+    }
+
+    $logPrefix = "[動画 $VideoIndex/$TotalVideos] $($srcItem.Name)"
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    if (Test-Path $dstFile) { Remove-Item $dstFile -Force }
+
     $finalYaw = $YawOffset
 
-    if ($AudioCodec -in 'FLAC', 'PCM' -and $hasMovieConverter) {
-        # Intermediate stitch file in RAMDISK/TEMP directory
-        $tempStitch = [System.IO.Path]::Combine($workingTempDir, "theta_stitch_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
-        $tempWav = [System.IO.Path]::Combine($workingTempDir, "theta_audio_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
-        $tempMov = [System.IO.Path]::Combine($workingTempDir, "theta_mov_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
+    if ($AudioCodec -in 'FLAC', 'PCM' -and $HasMovieConverter) {
+        $tempStitch = [System.IO.Path]::Combine($WorkingTempDir, "theta_stitch_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
+        $tempWav = [System.IO.Path]::Combine($WorkingTempDir, "theta_audio_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
+        $tempMov = [System.IO.Path]::Combine($WorkingTempDir, "theta_mov_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mov")
 
-        Write-Host "  (1/3) 公式天頂補正スティッチ実行中 (DualfishBlender)..." -ForegroundColor Yellow
-        $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$tempStitch`""
+        # 1. DualfishBlender stitch
+        $arguments = "$OptionsStr `"$SrcFile`" `"$tempStitch`""
         $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pinfo.FileName = $blenderPath
+        $pinfo.FileName = $BlenderPath
         $pinfo.Arguments = $arguments
-        $pinfo.WorkingDirectory = $resourcesPath
+        $pinfo.WorkingDirectory = $ResourcesPath
         $pinfo.UseShellExecute = $false
         $procBlender = [System.Diagnostics.Process]::Start($pinfo)
         $procBlender.WaitForExit()
 
         if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
-            Write-Host "  (2/3) 公式4ch空間音声展開中 (RICOH THETA Movie Converter)..." -ForegroundColor Yellow
-            $mcExit = Invoke-ExtractSpatialWav -McDir $movieConverterDir -StitchedMp4Path $tempStitch -TempWav $tempWav -TempMov $tempMov -WorkDir $workingTempDir
+            # 2. Movie Converter 4ch audio extraction
+            $tempRunner = [System.IO.Path]::Combine($WorkingTempDir, "theta_runner_$([System.Guid]::NewGuid().ToString('N')).ps1")
+            $dllPathEscaped = [System.IO.Path]::Combine($MovieConverterDir, "Mp4ConverterLib.dll").Replace('\', '\\')
+            $mcDirEscaped = $MovieConverterDir.Replace('\', '\\')
+            $stitchedEscaped = $tempStitch.Replace('\', '\\')
+            $wavEscaped = $tempWav.Replace('\', '\\')
+            $movEscaped = $tempMov.Replace('\', '\\')
 
-            Write-Host "  (3/3) 映像 + 4ch 空間音声($AudioCodec)結合中..." -ForegroundColor Yellow
+            $lines = @(
+                'Add-Type -TypeDefinition @"',
+                'using System;',
+                'using System.Runtime.InteropServices;',
+                'public class NativeMp4Converter {',
+                "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"InitializeFfmpeg`", CallingConvention = CallingConvention.Cdecl)]",
+                '    public static extern void InitializeFfmpeg();',
+                "    [DllImport(@`"$dllPathEscaped`", EntryPoint = `"Convert`", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]",
+                '    public static extern int Convert(string mp4Name, string wavName, string movName);',
+                '}',
+                '"@',
+                "[System.IO.Directory]::SetCurrentDirectory('$mcDirEscaped')",
+                '[NativeMp4Converter]::InitializeFfmpeg()',
+                "`$ret = [NativeMp4Converter]::Convert('$stitchedEscaped', '$wavEscaped', '$movEscaped')",
+                'exit `$ret'
+            )
+            $utf8WithBom = [System.Text.UTF8Encoding]::new($true)
+            [System.IO.File]::WriteAllLines($tempRunner, $lines, $utf8WithBom)
 
+            $x86PowerShell = Join-Path $env:SystemRoot "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+            if (-not (Test-Path $x86PowerShell)) { $x86PowerShell = "powershell.exe" }
+            & "$x86PowerShell" -NoProfile -ExecutionPolicy Bypass -File "$tempRunner" *>$null
+            Remove-Item $tempRunner -Force -ErrorAction SilentlyContinue
+
+            # 3. Audio & Video Mux
             $vFilterParam = if ($finalYaw -ne 0.0) { "-vf `"v360=e:e:yaw=$finalYaw`"" } else { "" }
             $vCodecParam = if ($vFilterParam) { "-c:v h264_nvenc -b:v 56000000" } else { "-c:v copy" }
 
-            # Audio rotation filter: if yaw is applied, rotate 4ch Ambisonics coordinates to match video rotation
-            $aFilterParam = if ($finalYaw -ne 0.0 -and $AudioCodec -eq 'PCM') {
-                $ambixPan = Get-AmbisonicsRotationFilter -YawDeg $finalYaw
-                "-af `"$ambixPan`""
-            } else {
-                ""
+            $aFilterParam = ""
+            if ($finalYaw -ne 0.0 -and $AudioCodec -eq 'PCM') {
+                $rad = $finalYaw * [Math]::PI / 180.0
+                $cosStr = ([Math]::Cos($rad)).ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
+                $sinStr = ([Math]::Sin($rad)).ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
+                $negSinStr = (-[Math]::Sin($rad)).ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
+                $ambixPan = "pan=4c|c0=c0|c1=${cosStr}*c1+${sinStr}*c3|c2=c2|c3=${negSinStr}*c1+${cosStr}*c3"
+                $aFilterParam = "-af `"$ambixPan`""
             }
 
             $audioParams = ""
@@ -651,7 +515,7 @@ foreach ($srcFile in $videoFiles) {
                 }
             }
 
-            # If MOV + PCM with NO yaw adjustment, directly use official Movie Converter output
+            $muxSuccess = $false
             if ($AudioCodec -eq 'PCM' -and $Container -eq 'MOV' -and (Test-Path $tempMov) -and ($finalYaw -eq 0.0)) {
                 Move-Item $tempMov $dstFile -Force
                 $muxSuccess = $true
@@ -659,19 +523,10 @@ foreach ($srcFile in $videoFiles) {
                 $ffmpegCmd = "ffmpeg -i `"$tempMov`" $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                 cmd.exe /c $ffmpegCmd
                 $muxSuccess = (Test-Path $dstFile)
-                if ($muxSuccess) {
-                    # Inject 360 Spherical Video & SA3D Spatial Audio metadata
-                    Inject-SphericalAndSpatialAudioMetadata -TargetMoviePath $dstFile -ToolsDir (Join-Path $scriptDir "tools") -WorkDir $workingTempDir -HasSpatialAudio ($AudioCodec -eq 'PCM') | Out-Null
-                }
             } elseif (Test-Path $tempWav) {
                 $ffmpegCmd = "ffmpeg -i `"$tempStitch`" -i `"$tempWav`" -map 0:v:0 -map 1:a:0 $vCodecParam $vFilterParam $audioParams $fmtParam `"$dstFile`" -y -loglevel error"
                 cmd.exe /c $ffmpegCmd
                 $muxSuccess = (Test-Path $dstFile)
-                if ($muxSuccess) {
-                    Inject-SphericalAndSpatialAudioMetadata -TargetMoviePath $dstFile -ToolsDir (Join-Path $scriptDir "tools") -WorkDir $workingTempDir -HasSpatialAudio ($AudioCodec -eq 'PCM') | Out-Null
-                }
-            } else {
-                $muxSuccess = $false
             }
 
             Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
@@ -679,38 +534,205 @@ foreach ($srcFile in $videoFiles) {
             Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
 
             if ($muxSuccess -and (Test-Path $dstFile)) {
-                # Synchronize accurate UTC and Local timezone timestamps for Android/Google Photos
-                Set-AccurateMediaTimestamp -FilePath $dstFile -TargetDateTime $targetDt
+                # 4. Inject 360 metadata if filtered
+                if ($finalYaw -ne 0.0 -or $Container -ne 'MOV' -or $AudioCodec -ne 'PCM') {
+                    $hasSpatialAudio = ($AudioCodec -eq 'PCM')
+                    $audioArg = if ($hasSpatialAudio) { "metadata.audio = metadata_utils.get_spatial_audio_metadata(ambisonic_order=1, head_locked_stereo=False)" } else { "" }
+                    $pyScript = @"
+import sys, os, shutil
+tools_dir = r'$ToolsDir'
+target = r'$dstFile'
+work_dir = r'$WorkingTempDir'
+sys.path.insert(0, tools_dir)
+try:
+    from spatialmedia import metadata_utils
+    metadata = metadata_utils.Metadata()
+    metadata.video = metadata_utils.generate_spherical_xml()
+    $audioArg
+    temp_out = os.path.join(work_dir, 'theta_inj_' + os.path.basename(target))
+    metadata_utils.inject_metadata(target, temp_out, metadata, lambda s: None)
+    if os.path.exists(temp_out) and os.path.getsize(temp_out) > 0:
+        shutil.move(temp_out, target)
+        sys.exit(0)
+    else:
+        sys.exit(1)
+except Exception as e:
+    sys.exit(2)
+"@
+                    $tempPy = [System.IO.Path]::Combine($WorkingTempDir, "theta_inject_$([System.Guid]::NewGuid().ToString('N')).py")
+                    [System.IO.File]::WriteAllText($tempPy, $pyScript, [System.Text.Encoding]::UTF8)
+                    python "$tempPy" *>$null
+                    Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
+                }
 
-                $stopwatch.Stop()
-                Write-Host "  [OK] 完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - 360度映像・4ch空間音声連動同期・タイムゾーン完全同期完了" -ForegroundColor Green
+                # 5. Timestamp sync
+                $utcDt = $targetDt.ToUniversalTime()
+                $dtUtcStr = $utcDt.ToString("yyyy:MM:dd HH:mm:ss")
+                $dtIsoLocalStr = $targetDt.ToString("yyyy-MM-ddTHH:mm:sszzz")
+                exiftool -overwrite_original `
+                    "-QuickTime:CreateDate=$dtUtcStr" `
+                    "-QuickTime:ModifyDate=$dtUtcStr" `
+                    "-QuickTime:TrackCreateDate=$dtUtcStr" `
+                    "-QuickTime:TrackModifyDate=$dtUtcStr" `
+                    "-QuickTime:MediaCreateDate=$dtUtcStr" `
+                    "-QuickTime:MediaModifyDate=$dtUtcStr" `
+                    "-Keys:CreationDate=$dtIsoLocalStr" `
+                    "-UserData:DateTimeOriginal=$dtIsoLocalStr" `
+                    "-XMP:DateTimeOriginal=$dtIsoLocalStr" `
+                    "-XMP:CreateDate=$dtIsoLocalStr" `
+                    "-XMP:ModifyDate=$dtIsoLocalStr" `
+                    "$dstFile" *>$null
+
+                $dstItem = Get-Item $dstFile
+                $dstItem.CreationTime = $targetDt
+                $dstItem.LastWriteTime = $targetDt
+                $dstItem.LastAccessTime = $targetDt
+
+                $sw.Stop()
+                return [PSCustomObject]@{
+                    Success = $true
+                    Message = "$logPrefix 完了 ($([Math]::Round($sw.Elapsed.TotalSeconds, 1))秒) -> $dstFileName"
+                }
             } else {
-                Write-Error "  [NG] 空間音声の結合に失敗しました。"
+                return [PSCustomObject]@{
+                    Success = $false
+                    Message = "$logPrefix エラー (空間音声結合失敗)"
+                }
             }
         } else {
             Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
-            Write-Error "  [NG] DualfishBlender による映像スティッチに失敗しました (ExitCode: $($procBlender.ExitCode))"
+            return [PSCustomObject]@{
+                Success = $false
+                Message = "$logPrefix エラー (DualfishBlender スティッチ失敗)"
+            }
         }
     } else {
         # Standard video-only conversion
-        $arguments = "$optionsStr `"$($srcItem.FullName)`" `"$dstFile`""
+        $arguments = "$OptionsStr `"$SrcFile`" `"$dstFile`""
         $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pinfo.FileName = $blenderPath
+        $pinfo.FileName = $BlenderPath
         $pinfo.Arguments = $arguments
-        $pinfo.WorkingDirectory = $resourcesPath
+        $pinfo.WorkingDirectory = $ResourcesPath
         $pinfo.UseShellExecute = $false
         $procBlender = [System.Diagnostics.Process]::Start($pinfo)
         $procBlender.WaitForExit()
 
         if ($procBlender.ExitCode -eq 0 -and (Test-Path $dstFile)) {
-            Set-AccurateMediaTimestamp -FilePath $dstFile -TargetDateTime $targetDt
-            Write-Host "  [OK] 変換完了 ($([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))秒) - タイムゾーン完全同期完了" -ForegroundColor Green
+            $utcDt = $targetDt.ToUniversalTime()
+            $dtUtcStr = $utcDt.ToString("yyyy:MM:dd HH:mm:ss")
+            $dtIsoLocalStr = $targetDt.ToString("yyyy-MM-ddTHH:mm:sszzz")
+            exiftool -overwrite_original `
+                "-QuickTime:CreateDate=$dtUtcStr" `
+                "-QuickTime:ModifyDate=$dtUtcStr" `
+                "-QuickTime:TrackCreateDate=$dtUtcStr" `
+                "-QuickTime:TrackModifyDate=$dtUtcStr" `
+                "-QuickTime:MediaCreateDate=$dtUtcStr" `
+                "-QuickTime:MediaModifyDate=$dtUtcStr" `
+                "-Keys:CreationDate=$dtIsoLocalStr" `
+                "-UserData:DateTimeOriginal=$dtIsoLocalStr" `
+                "-XMP:DateTimeOriginal=$dtIsoLocalStr" `
+                "-XMP:CreateDate=$dtIsoLocalStr" `
+                "-XMP:ModifyDate=$dtIsoLocalStr" `
+                "$dstFile" *>$null
+
+            $dstItem = Get-Item $dstFile
+            $dstItem.CreationTime = $targetDt
+            $dstItem.LastWriteTime = $targetDt
+            $dstItem.LastAccessTime = $targetDt
+
+            $sw.Stop()
+            return [PSCustomObject]@{
+                Success = $true
+                Message = "$logPrefix 完了 ($([Math]::Round($sw.Elapsed.TotalSeconds, 1))秒) -> $dstFileName"
+            }
         } else {
-            Write-Error "  [NG] DualfishBlender がエラー終了しました (ExitCode: $($procBlender.ExitCode))"
+            return [PSCustomObject]@{
+                Success = $false
+                Message = "$logPrefix エラー (DualfishBlender 失敗)"
+            }
         }
     }
 }
 #endregion
+
+#region Parallel Batch Execution Loop
+Write-Host "`n============================================================" -ForegroundColor Cyan
+Write-Host "動画一括変換設定 ($Threads セッション並列実行):" -ForegroundColor Green
+Write-Host "  - 一時作業領域 : $tempDisplayStr" -ForegroundColor White
+Write-Host "  - スタビライズ : $Mode ($($optionList[0]))" -ForegroundColor White
+Write-Host "  - 正面方位設定 : $(if ($CenterTime) { "タイムコード ($CenterTime) 時点を正面に固定" } elseif ($YawOffset -ne 0.0) { "ヨー角オフセット ($YawOffset°)" } else { "開始時基準" })" -ForegroundColor White
+Write-Host "  - コンテナ形式 : $Container (.$($Container.ToLowerInvariant())) $(if ($Container -eq 'MOV') { '[YouTube空間音声公式推奨 / SA3D内蔵]' })" -ForegroundColor White
+Write-Host "  - 音声モード   : $AudioCodec $(if ($AudioCodec -eq 'PCM') { '(4ch 空間音声 Ambisonics / YouTube公式完全対応)' } elseif ($AudioCodec -eq 'FLAC') { '【スーパー非推奨 / YouTube空間音声非対応】' } else { '(通常ステレオ)' })" -ForegroundColor White
+Write-Host "============================================================" -ForegroundColor Cyan
+
+$totalWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$toolsDir = Join-Path $scriptDir "tools"
+
+$pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $Threads)
+$pool.Open()
+
+$runspaces = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+
+$vIdx = 0
+foreach ($srcFile in $videoFiles) {
+    $vIdx++
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.RunspacePool = $pool
+    
+    [void]$ps.AddScript($workerScriptBlock).AddParameters(@{
+        SrcFile           = $srcFile
+        VideoIndex        = $vIdx
+        TotalVideos       = $videoFiles.Count
+        Mode              = $Mode
+        OptionsStr        = $optionsStr
+        Container         = $Container
+        AudioCodec        = $AudioCodec
+        YawOffset         = $YawOffset
+        CenterTime        = $CenterTime
+        OutputDir         = $OutputDir
+        WorkingTempDir    = $workingTempDir
+        BlenderPath       = $blenderPath
+        ResourcesPath     = $resourcesPath
+        MovieConverterDir = $movieConverterDir
+        HasMovieConverter = $hasMovieConverter
+        ToolsDir          = $toolsDir
+    })
+
+    $asyncResult = $ps.BeginInvoke()
+    [void]$runspaces.Add([PSCustomObject]@{
+        PowerShell  = $ps
+        AsyncResult = $asyncResult
+        FileName    = [System.IO.Path]::GetFileName($srcFile)
+        Index       = $vIdx
+    })
+    Write-Host "  [開始 $vIdx/$($videoFiles.Count)] $($srcItem.Name)" -ForegroundColor Gray
+}
+
+# Monitor running tasks and print results as they complete
+while ($runspaces.Count -gt 0) {
+    for ($i = $runspaces.Count - 1; $i -ge 0; $i--) {
+        $r = $runspaces[$i]
+        if ($r.AsyncResult.IsCompleted) {
+            try {
+                $output = $r.PowerShell.EndInvoke($r.AsyncResult)
+                if ($output.Success) {
+                    Write-Host "  [OK] $($output.Message)" -ForegroundColor Green
+                } else {
+                    Write-Error "  [NG] $($output.Message)"
+                }
+            } catch {
+                Write-Error "  [NG] [動画 $($r.Index)] $($r.FileName) 例外エラー: $_"
+            } finally {
+                $r.PowerShell.Dispose()
+                $runspaces.RemoveAt($i)
+            }
+        }
+    }
+    Start-Sleep -Milliseconds 200
+}
+
+$pool.Close()
+$pool.Dispose()
 
 # Clean up temporary directory if empty
 try {
@@ -722,6 +744,7 @@ try {
     }
 } catch { }
 
+$totalWatch.Stop()
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "すべての処理が完了しました (動画: $($videoFiles.Count) 件)" -ForegroundColor Green
+Write-Host "すべての処理が完了しました (動画: $($videoFiles.Count) 件, 総所要時間: $([Math]::Round($totalWatch.Elapsed.TotalSeconds, 1)) 秒)" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
