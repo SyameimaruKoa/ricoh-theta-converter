@@ -187,7 +187,8 @@ $restoreWorkerScriptBlock = {
         [string]$BlenderPath,
         [string]$ResourcesPath,
         [string]$MovieConverterDir,
-        [hashtable]$SyncState
+        [hashtable]$SyncState,
+        [int]$WorkerId
     )
 
     $srcItem = Get-Item $SrcFile
@@ -196,18 +197,6 @@ $restoreWorkerScriptBlock = {
     $rawBaseName = [System.IO.Path]::GetFileNameWithoutExtension($srcItem.Name) -replace $cleanRegex, ''
     
     $dstFile = [System.IO.Path]::Combine($dir, "$rawBaseName$ModeSuffix.mov")
-
-    if ($SyncState) {
-        $SyncState[$VideoIndex] = [Hashtable]::Synchronized(@{
-            VideoIndex  = $VideoIndex
-            TotalVideos = $TotalVideos
-            FileName    = $srcItem.Name
-            Percent     = 0.0
-            CurSec      = 0.0
-            TotalSec    = 0.0
-            Stage       = "スティッチ処理中"
-        })
-    }
 
     $rawCandidates = @(
         (Join-Path $dir "$rawBaseName.MP4"),
@@ -249,6 +238,16 @@ $restoreWorkerScriptBlock = {
     if (Test-Path $dstFile) { Remove-Item $dstFile -Force }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $logPrefix = "[動画 $VideoIndex/$TotalVideos] $($srcItem.Name)"
+
+    # SyncState 初期化（主スレッドに状態を通知）
+    $SyncState["started_$WorkerId"] = $true
+    $SyncState["file_$WorkerId"]    = $srcItem.Name
+    $SyncState["index_$WorkerId"]   = $VideoIndex
+    $SyncState["total_$WorkerId"]   = $TotalVideos
+    $SyncState["stage_$WorkerId"]   = "スティッチ処理中"
+    $SyncState["curSec_$WorkerId"]  = 0.0
+    $SyncState["totSec_$WorkerId"]  = 0.0
 
     $tempStitch = [System.IO.Path]::Combine($WorkingTempDir, "theta_stitch_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).mp4")
     $tempWav = [System.IO.Path]::Combine($WorkingTempDir, "theta_audio_${rawBaseName}_$([System.Guid]::NewGuid().ToString('N')).wav")
@@ -261,46 +260,24 @@ $restoreWorkerScriptBlock = {
     $pinfo.WorkingDirectory = $ResourcesPath
     $pinfo.UseShellExecute = $false
     $pinfo.RedirectStandardOutput = $true
-    $pinfo.RedirectStandardError = $true
+    $pinfo.RedirectStandardError  = $true
     $pinfo.CreateNoWindow = $true
     $procBlender = [System.Diagnostics.Process]::Start($pinfo)
 
-    $charBuf = [System.Text.StringBuilder]::new()
-    $lastErrorLines = [System.Collections.Generic.List[string]]::new()
-    while (-not $procBlender.HasExited -or -not $procBlender.StandardOutput.EndOfStream) {
-        $c = $procBlender.StandardOutput.Read()
-        if ($c -eq -1) { break }
-        $ch = [char]$c
-        if ($ch -eq "`r" -or $ch -eq "`n") {
-            if ($charBuf.Length -gt 0) {
-                $line = $charBuf.ToString().Trim()
-                $charBuf.Clear()
-                if ($line -match 'processing frame\s+(\d+)\s+([0-9\.]+)\/([0-9\.]+)') {
-                    $curSec = [double]$Matches[2]
-                    $totalSec = [double]$Matches[3]
-                    $pct = if ($totalSec -gt 0) { [Math]::Min(95.0, [Math]::Round(($curSec / $totalSec) * 100, 1)) } else { 0.0 }
-                    if ($SyncState -and $SyncState.ContainsKey($VideoIndex)) {
-                        $SyncState[$VideoIndex].Percent = $pct
-                        $SyncState[$VideoIndex].CurSec = $curSec
-                        $SyncState[$VideoIndex].TotalSec = $totalSec
-                    }
-                } elseif (-not [string]::IsNullOrWhiteSpace($line)) {
-                    if ($lastErrorLines.Count -ge 10) { [void]$lastErrorLines.RemoveAt(0) }
-                    $lastErrorLines.Add($line)
-                }
-            }
-        } else {
-            [void]$charBuf.Append($ch)
+    # stdout を同期 ReadLine でフレーム進捗取得（stderr は非同期で捨てる）
+    $stderrTask = $procBlender.StandardError.ReadToEndAsync()
+    while (-not $procBlender.StandardOutput.EndOfStream) {
+        $line = $procBlender.StandardOutput.ReadLine()
+        if ($null -ne $line -and $line -match '^processing frame\s+\d+\s+([\d.]+)/([\d.]+)') {
+            $SyncState["curSec_$WorkerId"] = [double]$Matches[1]
+            $SyncState["totSec_$WorkerId"] = [double]$Matches[2]
         }
     }
     $procBlender.WaitForExit()
+    [void]$stderrTask
 
     if ($procBlender.ExitCode -eq 0 -and (Test-Path $tempStitch)) {
-        if ($SyncState -and $SyncState.ContainsKey($VideoIndex)) {
-            $SyncState[$VideoIndex].Percent = 96.0
-            $SyncState[$VideoIndex].Stage = "4ch空間音声結合中"
-        }
-
+        $SyncState["stage_$WorkerId"] = "4ch空間音声結合中"
         $tempRunner = [System.IO.Path]::Combine($WorkingTempDir, "theta_runner_$([System.Guid]::NewGuid().ToString('N')).ps1")
         $dllPathEscaped = [System.IO.Path]::Combine($MovieConverterDir, "Mp4ConverterLib.dll").Replace('\', '\\')
         $mcDirEscaped = $MovieConverterDir.Replace('\', '\\')
@@ -334,6 +311,7 @@ $restoreWorkerScriptBlock = {
         Remove-Item $tempRunner -Force -ErrorAction SilentlyContinue
 
         if ((Test-Path $tempMov) -and (Get-Item $tempMov).Length -gt 0) {
+            $SyncState["stage_$WorkerId"] = "タイムスタンプ同期中"
             Move-Item $tempMov $dstFile -Force
 
             $utcDt = $targetDt.ToUniversalTime()
@@ -363,30 +341,27 @@ $restoreWorkerScriptBlock = {
             Remove-Item $tempWav -Force -ErrorAction SilentlyContinue
             Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
 
-            if ($SyncState -and $SyncState.ContainsKey($VideoIndex)) {
-                $SyncState[$VideoIndex].Percent = 100.0
-                $SyncState[$VideoIndex].Stage = "完了"
-            }
-
+            $SyncState["done_$WorkerId"] = $true
             return [PSCustomObject]@{
                 Success = $true
-                Message = "$($srcItem.Name) ($([Math]::Round($sw.Elapsed.TotalSeconds, 1))秒) -> $([System.IO.Path]::GetFileName($dstFile))"
+                Message = "$logPrefix 復元完了 ($([Math]::Round($sw.Elapsed.TotalSeconds, 1))秒) -> $([System.IO.Path]::GetFileName($dstFile))"
             }
         } else {
             Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
             Remove-Item $tempWav -Force -ErrorAction SilentlyContinue
             Remove-Item $tempMov -Force -ErrorAction SilentlyContinue
+            $SyncState["done_$WorkerId"] = $true
             return [PSCustomObject]@{
                 Success = $false
-                Message = "$($srcItem.Name) エラー (Movie Converter 失敗)"
+                Message = "$logPrefix エラー (Movie Converter 失敗)"
             }
         }
     } else {
         Remove-Item $tempStitch -Force -ErrorAction SilentlyContinue
-        $errDetail = if ($lastErrorLines.Count -gt 0) { $lastErrorLines -join " | " } else { "スティッチ失敗" }
+        $SyncState["done_$WorkerId"] = $true
         return [PSCustomObject]@{
             Success = $false
-            Message = "$($srcItem.Name) エラー ($errDetail)"
+            Message = "$logPrefix エラー (DualfishBlender スティッチ失敗)"
         }
     }
 }
@@ -404,32 +379,32 @@ Write-Host "空間音声エンジン   : RICOH THETA Movie Converter 公式純�
 Write-Host "============================================================" -ForegroundColor Cyan
 
 $totalWatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+$SyncState = [Hashtable]::Synchronized(@{})
+
 $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $Threads)
 $pool.Open()
 
 $runspaces = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
-$syncState = [Hashtable]::Synchronized(@{})
-$startedSet = [System.Collections.Generic.HashSet[int]]::new()
-$totalVideos = $inputFiles.Count
-$completedCount = 0
 
 $idx = 0
 foreach ($srcFile in $inputFiles) {
     $idx++
     $ps = [System.Management.Automation.PowerShell]::Create()
     $ps.RunspacePool = $pool
-    
+
     [void]$ps.AddScript($restoreWorkerScriptBlock).AddParameters(@{
         SrcFile           = $srcFile
         VideoIndex        = $idx
-        TotalVideos       = $totalVideos
+        TotalVideos       = $inputFiles.Count
         StabilizeOpt      = $stabilizeOpt
         ModeSuffix        = $modeSuffix
         WorkingTempDir    = $workingTempDir
         BlenderPath       = $blenderPath
         ResourcesPath     = $resourcesPath
         MovieConverterDir = $movieConverterDir
-        SyncState         = $syncState
+        SyncState         = $SyncState
+        WorkerId          = $idx
     })
 
     $asyncResult = $ps.BeginInvoke()
@@ -441,55 +416,75 @@ foreach ($srcFile in $inputFiles) {
     })
 }
 
+# Monitor running tasks: show [開始] when worker starts, Write-Progress for live progress, [完了]/[NG] on done
+$startedSet = [System.Collections.Generic.HashSet[int]]::new()
+$doneCount  = 0
+
 while ($runspaces.Count -gt 0) {
-    # Announce tasks when they actually begin execution
-    foreach ($k in @($syncState.Keys)) {
-        if ($startedSet.Add($k)) {
-            Write-Host "  [開始 $k/$totalVideos] $($syncState[$k].FileName)" -ForegroundColor Gray
+    # Detect newly started workers and print [開始]
+    foreach ($r in $runspaces) {
+        $wid = $r.Index
+        if (-not $startedSet.Contains($wid) -and $SyncState["started_$wid"]) {
+            [void]$startedSet.Add($wid)
+            Write-Host "  [開始 $wid/$($inputFiles.Count)] $($r.FileName)" -ForegroundColor Gray
         }
     }
 
-    # Check for completed tasks
+    # Write-Progress: overall
+    $overallPct = if ($inputFiles.Count -gt 0) { [int](($doneCount / $inputFiles.Count) * 100) } else { 0 }
+    Write-Progress -Id 0 -Activity "THETA 空間音声MOV 復元" `
+        -Status "完了: $doneCount / $($inputFiles.Count) 件" `
+        -PercentComplete $overallPct
+
+    # Write-Progress: per active worker
+    foreach ($r in $runspaces) {
+        $wid = $r.Index
+        if ($SyncState["started_$wid"]) {
+            $cur   = [double]($SyncState["curSec_$wid"])
+            $tot   = [double]($SyncState["totSec_$wid"])
+            $stage = [string]($SyncState["stage_$wid"])
+            $pct   = if ($tot -gt 0) { [int](($cur / $tot) * 100) } else { 0 }
+            $statusStr = "${stage}: $([Math]::Round($cur,1))s / $([Math]::Round($tot,1))s ($pct%)"
+            Write-Progress -Id $wid -ParentId 0 `
+                -Activity "[$wid/$($inputFiles.Count)] $($r.FileName)" `
+                -Status $statusStr `
+                -PercentComplete $pct
+        }
+    }
+
+    # Check for completed runspaces
     for ($i = $runspaces.Count - 1; $i -ge 0; $i--) {
         $r = $runspaces[$i]
         if ($r.AsyncResult.IsCompleted) {
-            $completedCount++
+            $wid = $r.Index
+            Write-Progress -Id $wid -Completed
             try {
                 $output = $r.PowerShell.EndInvoke($r.AsyncResult)
-                Write-Progress -Id $r.Index -Completed
-                if ($output.Success) {
-                    Write-Host "  [完了 $($r.Index)/$totalVideos] $($output.Message)" -ForegroundColor Green
-                } else {
-                    Write-Error "  [失敗 $($r.Index)/$totalVideos] $($output.Message)"
+                if ($output -and $output.Count -gt 0) {
+                    $msg = $output[0]
+                    if ($msg.Success) {
+                        $doneCount++
+                        Write-Host "  [完了 $wid/$($inputFiles.Count)] $($msg.Message)" -ForegroundColor Green
+                    }
+                    else {
+                        $doneCount++
+                        Write-Host "  [NG $wid/$($inputFiles.Count)] $($msg.Message)" -ForegroundColor Red
+                    }
+                }
+                else {
+                    $doneCount++
+                    Write-Host "  [NG $wid/$($inputFiles.Count)] $($r.FileName) 出力なし" -ForegroundColor Red
                 }
             } catch {
-                Write-Progress -Id $r.Index -Completed
-                Write-Error "  [例外 $($r.Index)/$totalVideos] $($r.FileName) 例外エラー: $_"
+                $doneCount++
+                Write-Host "  [NG $wid/$($inputFiles.Count)] $($r.FileName) 例外: $_" -ForegroundColor Red
             } finally {
                 $r.PowerShell.Dispose()
                 $runspaces.RemoveAt($i)
             }
         }
     }
-
-    # Update multi-task progress bar
-    if ($runspaces.Count -gt 0) {
-        $overallPct = if ($totalVideos -gt 0) { [Math]::Min(100.0, [Math]::Round(($completedCount / $totalVideos) * 100, 1)) } else { 0.0 }
-        Write-Progress -Id 0 -Activity "THETA 空間音声MOV 復元" -Status "完了: $completedCount / $totalVideos 件 ($overallPct%)" -PercentComplete $overallPct
-        
-        foreach ($k in @($syncState.Keys)) {
-            $task = $syncState[$k]
-            if ($task -and $task.Percent -lt 100) {
-                $secInfo = if ($task.TotalSec -gt 0) { " [$([Math]::Round($task.CurSec, 1))s / $([Math]::Round($task.TotalSec, 1))s]" } else { "" }
-                Write-Progress -Id $k -ParentId 0 `
-                    -Activity "[$k/$totalVideos] $($task.FileName)" `
-                    -Status "$($task.Stage)$secInfo ($($task.Percent)%)" `
-                    -PercentComplete $task.Percent
-            }
-        }
-    }
-
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds 500
 }
 
 Write-Progress -Id 0 -Completed
